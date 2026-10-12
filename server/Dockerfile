@@ -3,7 +3,7 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY server/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY server/app.py .
+COPY server/app.py server/demo.py ./
 COPY server/static ./static
 COPY agent ./agent
 ENV HOSTWATCH_PORT=8765

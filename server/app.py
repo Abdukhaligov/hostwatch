@@ -26,6 +26,7 @@ DATA_PATH = Path(os.environ.get("HOSTWATCH_DATA", "data/agents.json"))
 STALE_AFTER = int(os.environ.get("HOSTWATCH_STALE_AFTER", "30"))   # s without a report -> offline
 IDLE_AFTER = int(os.environ.get("HOSTWATCH_IDLE_AFTER", "120"))    # s without input -> idle
 ALLOW_PUBLIC = os.environ.get("HOSTWATCH_ALLOW_PUBLIC", "") == "1"
+DEMO = os.environ.get("HOSTWATCH_DEMO", "") == "1"   # fake office for screenshots, nothing is saved
 HERE = Path(__file__).parent
 STATIC_DIR = HERE / "static"
 AGENT_DIR = HERE / "agent" if (HERE / "agent").exists() else HERE.parent / "agent"
@@ -134,6 +135,8 @@ def day_summary(agent: dict, start: float, end: float) -> dict:
 
 
 def save() -> None:
+    if DEMO:
+        return
     try:
         DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = DATA_PATH.with_suffix(".tmp")
@@ -158,8 +161,12 @@ async def save_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    load()
-    task = asyncio.create_task(save_loop())
+    if DEMO:
+        import demo
+        task = asyncio.create_task(demo.run())
+    else:
+        load()
+        task = asyncio.create_task(save_loop())
     yield
     task.cancel()
     save()
@@ -184,7 +191,11 @@ async def lan_only(request: Request, call_next):
 
 @app.post("/api/report")
 async def report(request: Request) -> dict:
-    body = await request.json()
+    return ingest(await request.json(), request.client.host if request.client else None)
+
+
+def ingest(body: dict, ip: Optional[str]) -> dict:
+    """Stores one agent report (also fed by demo.py)."""
     agent_id = str(body.get("id") or "").lower()
     if not re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", agent_id):
         return {"ok": False, "error": "id must be the primary MAC address"}
@@ -197,7 +208,7 @@ async def report(request: Request) -> dict:
         agent["label"] = (str(label).strip()[:60] or None) if label is not None else None
         agent["label_set_at"] = label_at
 
-    body["ip_seen"] = request.client.host if request.client else None
+    body["ip_seen"] = ip
     agent["report"] = body
     agent["seen"] = time.time()
     record_activity(agent, agent["seen"], num(body.get("idle_seconds")))
@@ -253,7 +264,8 @@ def idle_report(day: Optional[str] = None) -> dict:
     for agent_id, agent in agents.items():
         view = view_of(agent_id, agent, now)
         summary = day_summary(agent, start, end)
-        current = summary["segments"][-1] if summary["segments"] and view["status"] == "idle" else None
+        viewing_today = start <= now < end
+        current = summary["segments"][-1] if viewing_today and summary["segments"] and view["status"] == "idle" else None
         rows.append({
             "id": agent_id, "name": agent.get("label") or view.get("hostname") or agent_id,
             "hostname": view.get("hostname"), "user": view.get("user"), "status": view["status"],
