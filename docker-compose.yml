@@ -1,0 +1,13 @@
+services:
+  hostwatch:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: hostwatch
+    restart: unless-stopped
+    ports:
+      - "${HOSTWATCH_BIND:-0.0.0.0}:${HOSTWATCH_PORT:-8765}:8765"
+    volumes:
+      - ./data:/data
+    environment:
+      HOSTWATCH_DATA: /data/agents.json

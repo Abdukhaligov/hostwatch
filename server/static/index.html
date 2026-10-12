@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#02070c">
+<title>HOSTWATCH</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+<header>
+  <div class="title"><span class="glyph">◢◤</span> HOSTWATCH</div>
+  <nav class="tabs" id="tabs">
+    <button data-tab="computers" class="on">COMPUTERS</button>
+    <button data-tab="idle">IDLE</button>
+  </nav>
+  <div class="live" id="live"><i></i><span>LIVE</span></div>
+  <div class="spacer"></div>
+  <div class="counts" id="counts"></div>
+  <a class="btn" href="agent/install.cmd">⬇ INSTALL AGENT</a>
+</header>
+
+<main id="view-computers">
+  <nav class="filters" id="filters">
+    <button data-f="all" class="on">ALL</button>
+    <button data-f="problems">PROBLEMS</button>
+    <button data-f="active">ACTIVE</button>
+    <button data-f="idle">IDLE</button>
+    <button data-f="offline">OFFLINE</button>
+  </nav>
+  <div id="grid" class="grid"></div>
+  <div id="empty" class="empty" hidden>
+    <h2>No PCs reporting yet</h2>
+    <p>On each Windows PC open this page, click <b>INSTALL AGENT</b> and run the downloaded
+      <code>install.cmd</code>. It installs for the current user (no admin rights), starts in the background
+      with a dot icon in the tray and reports here every second.</p>
+  </div>
+</main>
+
+<main id="view-idle" hidden>
+  <nav class="filters" id="days"></nav>
+  <div class="idle-legend">
+    <span><i class="sw active"></i>active</span><span><i class="sw idle"></i>idle (no input for <b id="idle-after">2</b> min)</span>
+    <span><i class="sw off"></i>offline / no data</span>
+  </div>
+  <div id="idle-rows"></div>
+</main>
+
+<script src="static/app.js"></script>
+</body>
+</html>
