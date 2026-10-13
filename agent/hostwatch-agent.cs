@@ -235,7 +235,7 @@ namespace Hostwatch
 
     class Program
     {
-        const string Version = "2.11";
+        const string Version = "2.12";
         const int IntervalMs = 1000;
         const int StaticEverySec = 60;
 
@@ -363,6 +363,8 @@ namespace Hostwatch
                 DateTime tickAt = DateTime.UtcNow;
                 double nowUnix = NowUnix();
                 string actState = Native.IdleSeconds() >= (uint)idleAfter ? "idle" : "active";
+                if (actState == "idle") System.Threading.Interlocked.Increment(ref idleSec);
+                else System.Threading.Interlocked.Increment(ref activeSec);
                 bool online = false;
                 try
                 {
@@ -662,10 +664,27 @@ namespace Hostwatch
 
         // ---------- tray (UI thread) ----------
         static NotifyIcon tray;
-        static ToolStripItem miStatus;
+        static ToolStripItem miStatus, miTimes;
         static Icon iconOk, iconErr;
         static bool shownOk = true;
         static string shownText = "";
+
+        // Is the logged-in user a member of the local Administrators group (even when not elevated)?
+        static bool UserIsAdmin()
+        {
+            try
+            {
+                using (WindowsIdentity id = WindowsIdentity.GetCurrent())
+                {
+                    SecurityIdentifier admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                    if (id.Groups != null)
+                        foreach (IdentityReference g in id.Groups)
+                            if (g == admins) return true;
+                }
+            }
+            catch { }
+            return false;
+        }
 
         static void RunTray()
         {
@@ -677,16 +696,29 @@ namespace Hostwatch
             tray.Text = "hostwatch: starting";
             tray.Visible = true;
 
+            bool admin = UserIsAdmin();
+
+            // Info shown to everyone (admins and users), always disabled.
             ContextMenuStrip menu = new ContextMenuStrip();
             miStatus = menu.Items.Add("Starting...");
             miStatus.Enabled = false;
-            menu.Items.Add("Set label...").Click += OnLabel;
-            menu.Items.Add("Open dashboard").Click += delegate { try { System.Diagnostics.Process.Start(config.Server); } catch { } };
-            menu.Items.Add("Change server...").Click += OnServer;
-            menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("Uninstall").Click += OnUninstall;
-            menu.Items.Add("Exit").Click += delegate { tray.Visible = false; Application.Exit(); };
-            menu.Opening += delegate { miStatus.Text = StatusLine(); };
+            ToolStripItem miVersion = menu.Items.Add("version " + Version);
+            miVersion.Enabled = false;
+            miTimes = menu.Items.Add("active - / idle -");
+            miTimes.Enabled = false;
+
+            // Actions only for admins.
+            if (admin)
+            {
+                menu.Items.Add(new ToolStripSeparator());
+                menu.Items.Add("Set label...").Click += OnLabel;
+                menu.Items.Add("Open dashboard").Click += delegate { try { System.Diagnostics.Process.Start(config.Server); } catch { } };
+                menu.Items.Add("Change server...").Click += OnServer;
+                menu.Items.Add(new ToolStripSeparator());
+                menu.Items.Add("Uninstall").Click += OnUninstall;
+                menu.Items.Add("Exit").Click += delegate { tray.Visible = false; Application.Exit(); };
+            }
+            menu.Opening += delegate { miStatus.Text = StatusLine(); miTimes.Text = TimesLine(); };
             tray.ContextMenuStrip = menu;
 
             System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
@@ -704,6 +736,21 @@ namespace Hostwatch
             string name = string.IsNullOrEmpty(config.Label) ? Environment.MachineName : config.Label;
             string st; lock (gate) { st = status; }
             return name + " - " + st;
+        }
+
+        static long activeSec, idleSec;   // totals since the agent started, shown in the tray
+
+        static string TimesLine()
+        {
+            return "active " + FmtDur(System.Threading.Interlocked.Read(ref activeSec))
+                 + " / idle " + FmtDur(System.Threading.Interlocked.Read(ref idleSec));
+        }
+
+        static string FmtDur(long sec)
+        {
+            if (sec < 60) return sec + "s";
+            long h = sec / 3600, m = (sec % 3600) / 60;
+            return h > 0 ? h + "h " + m + "m" : m + "m";
         }
 
         static void UpdateTray()

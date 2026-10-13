@@ -67,7 +67,7 @@ function card(a, now) {
   return `<article class="pc ${a.status} ${bad ? 'bad' : ''}">
     <div class="pc-head">
       <i class="dot"></i>
-      <div class="pc-name"><h3>${esc(name)}</h3><p>${esc(a.label ? `${a.hostname} · ` : '')}${esc(a.user || '')}</p></div>
+      <div class="pc-name"><h3>${esc(name)}</h3>${a.label && a.hostname ? `<p>${esc(a.hostname)}</p>` : ''}${a.user ? `<p>${esc(a.user)}</p>` : ''}${a.session_id != null && a.session_id >= 0 ? `<p>session ${a.session_id}</p>` : ''}</div>
       <span class="state ${a.status}">${stateText}</span>
       <button class="icon-btn" data-act="label" data-id="${esc(a.id)}" title="Rename">✎</button>
       ${a.status === 'offline' ? `<button class="icon-btn" data-act="forget" data-id="${esc(a.id)}" title="Remove from list">✕</button>` : ''}

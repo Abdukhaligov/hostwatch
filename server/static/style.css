@@ -57,8 +57,8 @@ main { max-width: 1600px; margin: 0 auto; padding: 18px 20px 40px; }
 .pc.idle .dot { background: var(--amber); }
 .pc.offline .dot { background: var(--dim); }
 .pc-name { flex: 1; min-width: 0; }
-.pc-name h3 { font-family: Orbitron, sans-serif; font-weight: 500; font-size: 14px; letter-spacing: 0.05em; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pc-name p { font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-name h3 { font-family: Orbitron, sans-serif; font-weight: 500; font-size: 14px; letter-spacing: 0.05em; color: #fff; overflow-wrap: anywhere; }
+.pc-name p { font-size: 11px; color: var(--dim); line-height: 1.4; overflow-wrap: anywhere; }
 .icon-btn { background: none; border: 0; color: var(--dim); font: inherit; font-size: 15px; cursor: pointer; padding: 3px 7px; }
 .icon-btn:hover { color: var(--text); }
 .mini { font: inherit; font-size: 11px; letter-spacing: 0.08em; color: var(--dim); background: none; border: 1px solid var(--line); padding: 2px 8px; margin-left: 5px; cursor: pointer; vertical-align: 1px; }
