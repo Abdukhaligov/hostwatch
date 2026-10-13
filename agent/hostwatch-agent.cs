@@ -209,11 +209,12 @@ namespace Hostwatch
 
     class Program
     {
-        const string Version = "2.1";
+        const string Version = "2.2";
         const int IntervalMs = 1000;
         const int StaticEverySec = 60;
 
         static Config config;
+        static string exePath = "";
         static readonly object gate = new object();
         static string status = "Starting...";
         static bool ok = true;
@@ -235,9 +236,15 @@ namespace Hostwatch
             string target = System.IO.Path.Combine(dir, "hostwatch.exe");
             config = new Config(System.IO.Path.Combine(dir, "config.json"));
 
-            for (int i = 0; i < args.Length - 1; i++)
-                if (args[i].Equals("-Server", StringComparison.OrdinalIgnoreCase))
-                { config.Server = args[i + 1].TrimEnd('/'); config.Save(); }
+            // The saved server is the source of truth: -Server only seeds it when nothing usable is
+            // saved yet, so changing the server from the tray survives reboots (the autostart command
+            // still passes -Server every time, but it no longer overrides a real address the user set).
+            // A loopback address is never reachable from a client, so treat it as "not set" and let a
+            // redeploy with the right -Server heal PCs that got stuck on 127.0.0.1.
+            if (string.IsNullOrEmpty(config.Server) || IsLoopback(config.Server))
+                for (int i = 0; i < args.Length - 1; i++)
+                    if (args[i].Equals("-Server", StringComparison.OrdinalIgnoreCase))
+                    { config.Server = args[i + 1].TrimEnd('/'); config.Save(); break; }
 
             if (Array.IndexOf(args, "-uninstall") >= 0) { Uninstall(dir); return; }
 
@@ -253,6 +260,7 @@ namespace Hostwatch
             // Run from %LOCALAPPDATA%\Hostwatch and start at every logon. When launched from
             // anywhere else (the downloaded copy), install into place and hand off to it.
             string self = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
+            exePath = self;
             bool installed = string.Equals(self, target, StringComparison.OrdinalIgnoreCase);
             SetAutostart(target, config.Server);
             if (!installed)
@@ -581,6 +589,7 @@ namespace Hostwatch
             if (!string.IsNullOrEmpty(answer))
             {
                 lock (gate) { config.Server = answer.TrimEnd('/'); config.Save(); }
+                SetAutostart(exePath, config.Server);   // keep the autostart command in sync
                 wake.Set();
             }
         }
@@ -643,6 +652,13 @@ namespace Hostwatch
                 { WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden, CreateNoWindow = true });
             }
             catch { }
+        }
+
+        static bool IsLoopback(string url)
+        {
+            if (string.IsNullOrEmpty(url)) return true;
+            string u = url.ToLowerInvariant();
+            return u.Contains("//127.") || u.Contains("//localhost") || u.Contains("//[::1]");
         }
 
         static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);

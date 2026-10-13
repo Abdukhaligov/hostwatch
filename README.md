@@ -100,23 +100,37 @@ Docker — в `data/`).
 
 Для запуска нужен `.NET Framework 4` — он есть в каждой Windows 10/11.
 
-### Пересобрать агент
-
-`hostwatch.exe` лежит в репозитории в `agent/`. Если поменялся исходник
-`agent/hostwatch-agent.cs`, пересобери на любой Windows-машине встроенным
-компилятором C# и положи новый exe обратно в `agent/`:
-
-```
-cd agent
-"%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /optimize+ /out:hostwatch.exe /r:System.Management.dll /r:Microsoft.VisualBasic.dll hostwatch-agent.cs
-```
-
 ![Меню в трее](docs/tray.png)
 
 Первая строка меню — метка и последний статус отправки (здесь сервер был
 недоступен).
 
-Удаление: `agent/uninstall.cmd`.
+Удаление: пункт **Uninstall** в меню трея или `hostwatch.exe -uninstall`.
+
+### Как собрать агент
+
+Готовый `agent/hostwatch.exe` лежит в репозитории, так что обычно собирать
+ничего не нужно. Пересборка требуется, только если поменялся исходник
+`agent/hostwatch-agent.cs`.
+
+Сборка идёт встроенным в Windows компилятором C# (`.NET Framework 4`, есть в
+любой Windows 10/11) — Visual Studio или .NET SDK не нужны. На Mac/Linux
+собрать нельзя.
+
+1. Скопируй папку `agent/` на любую Windows-машину.
+2. Запусти `agent/build.cmd` (двойным кликом). Он соберёт `hostwatch.exe`
+   рядом с исходником. Та же команда вручную:
+
+   ```
+   cd agent
+   "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /optimize+ /out:hostwatch.exe /r:System.Management.dll /r:Microsoft.VisualBasic.dll hostwatch-agent.cs
+   ```
+
+   На 32-битной Windows путь — `...\Framework\v4.0.30319\csc.exe` (без `64`);
+   `build.cmd` это учитывает сам.
+3. Проверь: `hostwatch.exe -Server http://<IP-сервера>:8765` — должна появиться
+   точка в трее, а компьютер — на дашборде.
+4. Положи новый `hostwatch.exe` обратно в `agent/` и закоммить.
 
 Нужна Windows 10/11 (PowerShell 5.1 встроен).
 
