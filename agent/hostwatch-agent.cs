@@ -115,6 +115,13 @@ namespace Hostwatch
             return Environment.UserDomainName + "\\" + Environment.UserName;
         }
 
+        // Console session id, for RDP shadowing (mstsc /shadow:<id>). -1 when no one is at the console.
+        public static long ConsoleSessionId()
+        {
+            try { uint s = WTSGetActiveConsoleSessionId(); return s == 0xFFFFFFFF ? -1 : (long)s; }
+            catch { return -1; }
+        }
+
         [DllImport("psapi.dll")]
         static extern bool EmptyWorkingSet(IntPtr process);
 
@@ -228,7 +235,7 @@ namespace Hostwatch
 
     class Program
     {
-        const string Version = "2.9";
+        const string Version = "2.10";
         const int IntervalMs = 1000;
         const int StaticEverySec = 60;
 
@@ -609,6 +616,7 @@ namespace Hostwatch
             sb.Append(",\"agent_version\":").Append(Json.Str(Version));
             sb.Append(",\"hostname\":").Append(Json.Str(Environment.MachineName));
             sb.Append(",\"user\":").Append(Json.Str(Native.ConsoleUser()));
+            sb.Append(",\"session_id\":").Append(Native.ConsoleSessionId());
             sb.Append(",\"os\":").Append(Json.Str(stat.Os));
             sb.Append(",\"model\":").Append(Json.Str(stat.Model));
             sb.Append(",\"ip\":").Append(Json.Str(stat.Ip));

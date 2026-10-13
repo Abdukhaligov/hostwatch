@@ -73,7 +73,7 @@ function card(a, now) {
       ${a.status === 'offline' ? `<button class="icon-btn" data-act="forget" data-id="${esc(a.id)}" title="Remove from list">✕</button>` : ''}
     </div>
     ${a.problems.length ? `<div class="problems">${a.problems.map((p) => `<span>▲ ${esc(p)}</span>`).join('')}</div>` : ''}
-    <div class="net"><b>${esc(a.ip || a.ip_seen || '—')}</b>${(a.ip || a.ip_seen) ? ` <button class="mini" data-act="rdp" data-ip="${esc(a.ip || a.ip_seen)}" data-host="${esc(name)}" title="Open Remote Desktop (RDP) to this PC">RDP</button>` : ''} · ${esc(a.mac || a.id)}${primary.name ? ` · ${esc(primary.name)}` : ''}${fmtSpeed(primary.speed) ? ` · ${fmtSpeed(primary.speed)}` : ''}</div>
+    <div class="net"><b>${esc(a.ip || a.ip_seen || '—')}</b>${(a.ip || a.ip_seen) ? ` <button class="mini" data-act="rdp" data-ip="${esc(a.ip || a.ip_seen)}" data-host="${esc(name)}" title="Open Remote Desktop (RDP) to this PC - starts a new session">RDP</button>` : ''}${(a.ip || a.ip_seen) && a.session_id != null && a.session_id >= 0 ? ` <button class="mini" data-act="shadow" data-ip="${esc(a.ip || a.ip_seen)}" data-sid="${a.session_id}" data-host="${esc(name)}" title="Join the user's current session (RDP shadow - view & control, no logout)">SHADOW</button>` : ''} · ${esc(a.mac || a.id)}${primary.name ? ` · ${esc(primary.name)}` : ''}${fmtSpeed(primary.speed) ? ` · ${fmtSpeed(primary.speed)}` : ''}</div>
     <div class="metric"><div class="row"><span>CPU</span><b>${cpu.percent != null ? `${Math.round(cpu.percent)}%` : '—'} of ${cpu.cores || '?'} cores / ${cpu.threads || '?'} threads</b></div>
       <div class="bar"><i class="${level(cpu.percent)}" style="width:${Math.min(100, cpu.percent || 0)}%"></i></div>
       ${spark(a.cpu_hist)}<div class="sub">${esc(cpu.name || '')}</div></div>
@@ -159,6 +159,14 @@ $('#grid').addEventListener('click', async (e) => {
     const link = document.createElement('a');
     link.href = URL.createObjectURL(new Blob([rdp], { type: 'application/x-rdp' }));
     link.download = `${(b.dataset.host || b.dataset.ip).replace(/[^\w.-]+/g, '_')}.rdp`;
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+    return;
+  } else if (b.dataset.act === 'shadow') {
+    const cmd = `@echo off\r\nrem Join ${b.dataset.host}'s current session (view & control, no logout).\r\nrem Run as an admin of the target PC. Drop /control for view-only.\r\nmstsc /shadow:${b.dataset.sid} /v:${b.dataset.ip} /control\r\n`;
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([cmd], { type: 'application/octet-stream' }));
+    link.download = `${(b.dataset.host || b.dataset.ip).replace(/[^\w.-]+/g, '_')}-shadow.cmd`;
     document.body.appendChild(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(link.href), 10000);
     return;

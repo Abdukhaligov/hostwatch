@@ -107,7 +107,7 @@ def report_for(pc: tuple, now: float, started: float, rng: random.Random, state:
         "disks": [{"name": n, "label": lb, "fs": "NTFS", "total": t * G, "free": f * G} for n, lb, t, f in disks],
         "net_io": {"rx_bps": rx, "tx_bps": tx},
         "uptime_seconds": 3 * 86400 + 5 * 3600 + (now - started),
-        "idle_seconds": idle,
+        "idle_seconds": idle, "session_id": 1,
     }
 
 
