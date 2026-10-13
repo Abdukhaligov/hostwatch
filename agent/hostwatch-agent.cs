@@ -235,7 +235,7 @@ namespace Hostwatch
 
     class Program
     {
-        const string Version = "2.12";
+        const string Version = "2.14";
         const int IntervalMs = 1000;
         const int StaticEverySec = 60;
 
@@ -328,9 +328,10 @@ namespace Hostwatch
 
             SetAutostart(machineInstall, self, config.Server);
 
-            // One agent per user for a per-user install; one per machine for an all-users install.
+            // One agent per logon session (works for any user, no special privilege), so the tray
+            // menu always matches whoever is currently logged in (admin sees actions, user doesn't).
             bool created;
-            Mutex mutex = new Mutex(true, machineInstall ? "Global\\HostwatchAgent" : "Local\\HostwatchAgent", out created);
+            Mutex mutex = new Mutex(true, "Local\\HostwatchAgent", out created);
             if (!created) return;
 
             ServicePointManager.Expect100Continue = false;
@@ -365,6 +366,7 @@ namespace Hostwatch
                 string actState = Native.IdleSeconds() >= (uint)idleAfter ? "idle" : "active";
                 if (actState == "idle") System.Threading.Interlocked.Increment(ref idleSec);
                 else System.Threading.Interlocked.Increment(ref activeSec);
+                requestToday = !seededToday;
                 bool online = false;
                 try
                 {
@@ -387,6 +389,18 @@ namespace Hostwatch
                         }
                     }
                     idleAfter = (int)Json.GetNum(reply, "idle_after", idleAfter);
+
+                    // Continue today's active/idle from the server instead of counting from zero.
+                    if (requestToday)
+                    {
+                        double ta = Json.GetNum(reply, "today_active", -1), ti = Json.GetNum(reply, "today_idle", -1);
+                        if (ta >= 0 && ti >= 0)
+                        {
+                            System.Threading.Interlocked.Exchange(ref activeSec, (long)ta);
+                            System.Threading.Interlocked.Exchange(ref idleSec, (long)ti);
+                        }
+                        seededToday = true;
+                    }
 
                     // Central retarget: the server can hand out a new address for every agent at once.
                     string pushed = (Json.GetStr(reply, "server_url") ?? "").TrimEnd('/');
@@ -619,6 +633,7 @@ namespace Hostwatch
             sb.Append(",\"hostname\":").Append(Json.Str(Environment.MachineName));
             sb.Append(",\"user\":").Append(Json.Str(Native.ConsoleUser()));
             sb.Append(",\"session_id\":").Append(Native.ConsoleSessionId());
+            if (requestToday) sb.Append(",\"want_today\":true");
             sb.Append(",\"os\":").Append(Json.Str(stat.Os));
             sb.Append(",\"model\":").Append(Json.Str(stat.Model));
             sb.Append(",\"ip\":").Append(Json.Str(stat.Ip));
@@ -738,7 +753,9 @@ namespace Hostwatch
             return name + " - " + st;
         }
 
-        static long activeSec, idleSec;   // totals since the agent started, shown in the tray
+        static long activeSec, idleSec;   // today's totals shown in the tray (seeded from the server)
+        static bool seededToday = false;  // asked the server for today's totals yet?
+        static bool requestToday = false; // include "want_today" in the next report
 
         static string TimesLine()
         {

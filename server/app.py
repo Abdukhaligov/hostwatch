@@ -376,6 +376,11 @@ def ingest(body: dict, ip: Optional[str]) -> dict:
     server_url = str(load_config().get("server_url") or "")
     if server_url.startswith("http"):
         response["server_url"] = server_url
+    # Today's totals, so the agent's tray counter continues from the server instead of resetting.
+    if body.get("want_today"):
+        today = day_summary(agent, day_start(agent["seen"]), day_start(agent["seen"]) + 86400)
+        response["today_active"] = today["active"]
+        response["today_idle"] = today["idle"]
     return response
 
 
