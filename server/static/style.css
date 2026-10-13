@@ -63,6 +63,9 @@ main { max-width: 1600px; margin: 0 auto; padding: 18px 20px 40px; }
 .icon-btn:hover { color: var(--text); }
 .mini { font: inherit; font-size: 9.5px; letter-spacing: 0.08em; color: var(--dim); background: none; border: 1px solid var(--line); padding: 0 5px; margin-left: 4px; cursor: pointer; vertical-align: 1px; }
 .mini:hover { color: var(--cyan); border-color: var(--cyan); }
+#day-pick { font: inherit; font-size: 11px; letter-spacing: 0.06em; color: var(--cyan); background: #02070c; border: 1px solid var(--line); padding: 4px 8px; cursor: pointer; }
+#day-pick:hover { border-color: var(--cyan); }
+#day-pick::-webkit-calendar-picker-indicator { filter: invert(0.6) sepia(1) hue-rotate(140deg); cursor: pointer; }
 
 .state { font-size: 11px; letter-spacing: 0.14em; padding: 2px 7px; border: 1px solid currentColor; white-space: nowrap; }
 .state.active { color: var(--green); }

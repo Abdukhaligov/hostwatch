@@ -209,7 +209,14 @@ function renderIdle(d) {
   lastWork = d.work;
   if ($('#work-editor').hidden) $('#work-info').textContent =
     `${d.work.tz} · ${d.work.intervals.map(([a, b]) => `${a}\u2013${b}`).join(', ')}`;
-  $('#days').innerHTML = d.days.map((day, i) => `<button data-day="${day}" class="${day === d.day ? 'on' : ''}">${i === 0 ? 'TODAY' : i === 1 ? 'YESTERDAY' : day.slice(5)}</button>`).join('');
+  if (!($('#day-pick') && $('#days').dataset.day === d.day)) {   // don't rebuild (and close the picker) on every refresh
+    $('#days').dataset.day = d.day;
+    const today = d.days[0], yesterday = d.days[1];
+    $('#days').innerHTML = `
+      <button data-day="${today}" class="${d.day === today ? 'on' : ''}">TODAY</button>
+      <button data-day="${yesterday}" class="${d.day === yesterday ? 'on' : ''}">YESTERDAY</button>
+      <input type="date" id="day-pick" min="${d.oldest}" max="${today}" value="${d.day}" title="Pick a day">`;
+  }
   const rows = d.rows.slice().sort((a, b) => b.idle - a.idle || String(a.name).localeCompare(String(b.name)));
   const axis = workAxis(d.work);
   const head = `<div class="irow head"><span>COMPUTER</span><span class="num">ACTIVE</span><span class="num">IDLE</span>
@@ -255,6 +262,12 @@ $('#days').addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   idleDay = b.dataset.day === $('#days button').dataset.day ? null : b.dataset.day;
+  pollIdle();
+});
+
+$('#days').addEventListener('change', (e) => {
+  if (e.target.id !== 'day-pick' || !e.target.value) return;
+  idleDay = e.target.value === $('#days [data-day]').dataset.day ? null : e.target.value;   // today -> live
   pollIdle();
 });
 

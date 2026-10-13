@@ -226,7 +226,7 @@ namespace Hostwatch
 
     class Program
     {
-        const string Version = "2.5";
+        const string Version = "2.6";
         const int IntervalMs = 1000;
         const int StaticEverySec = 60;
 
@@ -408,7 +408,7 @@ namespace Hostwatch
                 last.To = ts;
             else
                 pending.Add(new Seg { From = ts, To = ts, State = state });
-            double cutoff = ts - 7 * 86400;
+            double cutoff = ts - 60 * 86400;   // keep up to ~2 months of offline history
             pending.RemoveAll(seg => seg.To < cutoff);
         }
 

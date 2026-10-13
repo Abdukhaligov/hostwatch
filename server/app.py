@@ -44,7 +44,7 @@ AGENT_FILES = ("hostwatch.exe",)
 HISTORY_SECONDS = 900      # CPU/network samples kept (~15 min at one report per second)
 SPARK_POINTS = 120         # samples shown on the cards (~2 min)
 CPU_HOT_SECONDS = 120      # CPU ≥90% for this long is a problem
-TIMELINE_DAYS = 7          # active/idle history kept per PC
+TIMELINE_DAYS = 60         # active/idle history kept per PC (~2 months)
 MAX_GAP = 10               # s between reports still counted as continuous
 DEFAULT_WORK = {"tz": "Asia/Baku", "intervals": [["09:00", "12:00"], ["14:00", "18:00"]]}
 COMMANDS = ("clear_cache",)   # remote actions the dashboard can queue for an agent
@@ -457,8 +457,9 @@ def idle_report(day: Optional[str] = None) -> dict:
             "current_idle_since": current[0] if current else None,
             **summary,
         })
+    oldest = time.strftime("%Y-%m-%d", time.localtime(day_start(now) - (TIMELINE_DAYS - 1) * 86400))
     return {"ts": now, "day": time.strftime("%Y-%m-%d", time.localtime(start)), "start": start, "end": end,
-            "days": days, "idle_after": IDLE_AFTER, "work": work_config(), "rows": rows}
+            "days": days[:7], "oldest": oldest, "idle_after": IDLE_AFTER, "work": work_config(), "rows": rows}
 
 
 @app.get("/api/settings")
