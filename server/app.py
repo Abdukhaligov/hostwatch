@@ -47,6 +47,7 @@ CPU_HOT_SECONDS = 120      # CPU ≥90% for this long is a problem
 TIMELINE_DAYS = 7          # active/idle history kept per PC
 MAX_GAP = 10               # s between reports still counted as continuous
 DEFAULT_WORK = {"tz": "Asia/Baku", "intervals": [["09:00", "12:00"], ["14:00", "18:00"]]}
+COMMANDS = ("clear_cache",)   # remote actions the dashboard can queue for an agent
 
 agents: dict[str, dict] = {}   # agent id (primary MAC) -> {report, seen, label, ...}
 
@@ -319,7 +320,25 @@ def ingest(body: dict, ip: Optional[str]) -> dict:
         hist = agent.setdefault(key, [])
         hist.append(num(value))
         del hist[:-HISTORY_SECONDS]
-    return {"ok": True, "label": agent.get("label"), "label_set_at": num(agent.get("label_set_at"))}
+    response = {"ok": True, "label": agent.get("label"), "label_set_at": num(agent.get("label_set_at"))}
+    command = agent.pop("command", None)
+    if command:
+        response["command"] = command
+    return response
+
+
+@app.post("/api/agents/{agent_id}/command")
+async def queue_command(agent_id: str, request: Request) -> dict:
+    agent = agents.get(agent_id.lower())
+    if agent is None:
+        return {"ok": False, "error": "unknown agent"}
+    body = await request.json()
+    command = str(body.get("command") or "")
+    if command not in COMMANDS:
+        return {"ok": False, "error": "unknown command"}
+    agent["command"] = command
+    agent["command_at"] = time.time()
+    return {"ok": True}
 
 
 @app.post("/api/agents/{agent_id}/label")

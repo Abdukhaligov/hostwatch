@@ -61,6 +61,8 @@ main { max-width: 1600px; margin: 0 auto; padding: 18px 20px 40px; }
 .pc-name p { font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .icon-btn { background: none; border: 0; color: var(--dim); font: inherit; font-size: 13px; cursor: pointer; padding: 2px 4px; }
 .icon-btn:hover { color: var(--text); }
+.mini { font: inherit; font-size: 9.5px; letter-spacing: 0.08em; color: var(--dim); background: none; border: 1px solid var(--line); padding: 0 5px; margin-left: 4px; cursor: pointer; vertical-align: 1px; }
+.mini:hover { color: var(--cyan); border-color: var(--cyan); }
 
 .state { font-size: 11px; letter-spacing: 0.14em; padding: 2px 7px; border: 1px solid currentColor; white-space: nowrap; }
 .state.active { color: var(--green); }

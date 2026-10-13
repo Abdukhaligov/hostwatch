@@ -112,6 +112,23 @@ namespace Hostwatch
             catch { }
             return Environment.UserDomainName + "\\" + Environment.UserName;
         }
+
+        [DllImport("psapi.dll")]
+        static extern bool EmptyWorkingSet(IntPtr process);
+
+        // Trim process working sets so cached/idle pages are released back to the system.
+        // Without admin this covers the current user's own processes; elevated, it covers all.
+        public static void ClearMemory()
+        {
+            foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcesses())
+            {
+                try { EmptyWorkingSet(p.Handle); }
+                catch { }
+                finally { try { p.Dispose(); } catch { } }
+            }
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
     }
 
     // Minimal JSON writing (report) and reading (config + server reply).
@@ -209,7 +226,7 @@ namespace Hostwatch
 
     class Program
     {
-        const string Version = "2.2";
+        const string Version = "2.3";
         const int IntervalMs = 1000;
         const int StaticEverySec = 60;
 
@@ -322,6 +339,7 @@ namespace Hostwatch
                             config.Save();
                         }
                     }
+                    if (Json.GetStr(reply, "command") == "clear_cache") Native.ClearMemory();
                     bool good = Json.GetBool(reply, "ok");
                     SetStatus(good, good ? "sent " + DateTime.Now.ToString("HH:mm:ss")
                                          : "rejected: " + (Json.GetStr(reply, "error") ?? "?"));

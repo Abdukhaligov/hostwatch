@@ -76,7 +76,7 @@ function card(a, now) {
     <div class="metric"><div class="row"><span>CPU</span><b>${cpu.percent != null ? `${Math.round(cpu.percent)}%` : '—'} of ${cpu.cores || '?'} cores / ${cpu.threads || '?'} threads</b></div>
       <div class="bar"><i class="${level(cpu.percent)}" style="width:${Math.min(100, cpu.percent || 0)}%"></i></div>
       ${spark(a.cpu_hist)}<div class="sub">${esc(cpu.name || '')}</div></div>
-    <div class="metric"><div class="row"><span>MEMORY</span><b>${fmtBytes(mem.used)} / ${fmtBytes(mem.total)} · ${Math.round(memPct)}%</b></div>
+    <div class="metric"><div class="row"><span>MEMORY${a.status !== 'offline' ? ` <button class="mini" data-act="clearcache" data-id="${esc(a.id)}" title="Free cached memory (RAM) on this PC">free</button>` : ''}</span><b>${fmtBytes(mem.used)} / ${fmtBytes(mem.total)} · ${Math.round(memPct)}%</b></div>
       <div class="bar"><i class="${level(memPct)}" style="width:${memPct.toFixed(1)}%"></i></div></div>
     ${netBlock(a)}
     ${disks}
@@ -148,6 +148,12 @@ $('#grid').addEventListener('click', async (e) => {
     await fetch(`api/agents/${encodeURIComponent(b.dataset.id)}/label`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label }),
     });
+  } else if (b.dataset.act === 'clearcache') {
+    b.textContent = 'sent';
+    await fetch(`api/agents/${encodeURIComponent(b.dataset.id)}/command`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: 'clear_cache' }),
+    });
+    return;   // let the memory bar drop on the next polls
   } else if (b.dataset.act === 'forget' && confirm(`Remove ${agent?.label || agent?.hostname} from the list? It comes back if the agent reports again.`)) {
     await fetch(`api/agents/${encodeURIComponent(b.dataset.id)}`, { method: 'DELETE' });
   }
