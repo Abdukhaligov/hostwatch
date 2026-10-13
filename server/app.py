@@ -324,7 +324,7 @@ async def access_control(request: Request, call_next):
         return PlainTextResponse("hostwatch is LAN-only", status_code=403)
 
     path = request.url.path
-    agent_traffic = (request.method == "POST" and path == "/api/report") or path.startswith("/agent/")
+    agent_traffic = (request.method == "POST" and path.startswith("/api/report")) or path.startswith("/agent/")
     if agent_traffic or (client and client.is_loopback):
         return await call_next(request)
 
