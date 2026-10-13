@@ -77,11 +77,26 @@ Docker — в `data/`).
 1. Открой панель в браузере на этом компьютере.
 2. Нажми **⬇ INSTALL AGENT** и запусти скачанный `install.cmd`.
 
-Права администратора не нужны, адрес сервера уже вписан в файл. Агент
+Права администратора не нужны, адрес сервера уже вписан в файл. `install.cmd`
+просто копирует на ПК готовый `hostwatch.exe` — обычную программу, без
+скрипта-запускалки и скрытого PowerShell, что реже беспокоит антивирусы. Агент
 запускается вместе с Windows и работает в фоне с точкой в трее (голубая — всё
-хорошо, красная — нет связи с сервером). Меню иконки: **Set label…**,
-**Open dashboard**, **Change server…**, **Exit**. Метку можно поменять и в
-панели (✎).
+хорошо, красная — нет связи с сервером), занимает ~15–25 МБ памяти. Меню
+иконки: **Set label…**, **Open dashboard**, **Change server…**, **Exit**. Метку
+можно поменять и в панели (✎).
+
+Для запуска нужен `.NET Framework 4` — он есть в каждой Windows 10/11.
+
+### Пересобрать агент
+
+`hostwatch.exe` лежит в репозитории в `agent/`. Если поменялся исходник
+`agent/hostwatch-agent.cs`, пересобери на любой Windows-машине встроенным
+компилятором C# и положи новый exe обратно в `agent/`:
+
+```
+cd agent
+"%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /optimize+ /out:hostwatch.exe /r:System.Management.dll /r:Microsoft.VisualBasic.dll hostwatch-agent.cs
+```
 
 ![Меню в трее](docs/tray.png)
 

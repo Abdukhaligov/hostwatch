@@ -1,6 +1,7 @@
 """hostwatch - collects health reports from Windows PCs on the LAN.
 
-Each PC runs agent/hostwatch-agent.ps1, which POSTs a report every second:
+Each PC runs agent/hostwatch-agent.cs (built into hostwatch.exe on the machine),
+which POSTs a report every second:
 identity (hostname, user, MAC, IP), CPU, memory, disks, uptime and how long
 the keyboard/mouse have been idle. This server keeps the latest report per PC,
 flags problems and serves a dashboard at /.
@@ -33,7 +34,7 @@ DEMO = os.environ.get("HOSTWATCH_DEMO", "") == "1"   # fake office for screensho
 HERE = Path(__file__).parent
 STATIC_DIR = HERE / "static"
 AGENT_DIR = HERE / "agent" if (HERE / "agent").exists() else HERE.parent / "agent"
-AGENT_FILES = ("hostwatch-agent.ps1", "install.cmd", "uninstall.cmd")
+AGENT_FILES = ("hostwatch.exe", "hostwatch-agent.cs", "install.cmd", "uninstall.cmd")
 HISTORY_SECONDS = 900      # CPU/network samples kept (~15 min at one report per second)
 SPARK_POINTS = 120         # samples shown on the cards (~2 min)
 CPU_HOT_SECONDS = 120      # CPU ≥90% for this long is a problem
