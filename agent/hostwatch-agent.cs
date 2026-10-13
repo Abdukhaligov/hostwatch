@@ -226,12 +226,20 @@ namespace Hostwatch
 
     class Program
     {
-        const string Version = "2.3";
+        const string Version = "2.4";
         const int IntervalMs = 1000;
         const int StaticEverySec = 60;
 
+        const double MaxGapSec = 10;   // matches the server; samples within this join one segment
+
+        class Seg { public double From; public double To; public string State; }
+
         static Config config;
         static string exePath = "";
+        static int idleAfter = 120;    // server's idle threshold, learned from the report reply
+        static string pendingPath = "";
+        static readonly System.Collections.Generic.List<Seg> pending = new System.Collections.Generic.List<Seg>();
+        static double lastPendingSave = 0;
         static readonly object gate = new object();
         static string status = "Starting...";
         static bool ok = true;
@@ -251,6 +259,7 @@ namespace Hostwatch
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Hostwatch");
             Directory.CreateDirectory(dir);
             string target = System.IO.Path.Combine(dir, "hostwatch.exe");
+            pendingPath = System.IO.Path.Combine(dir, "pending.txt");
             config = new Config(System.IO.Path.Combine(dir, "config.json"));
 
             // The saved server is the source of truth: -Server only seeds it when nothing usable is
@@ -316,10 +325,14 @@ namespace Hostwatch
             Native.CpuTimes(out prevIdle, out prevBusy);
             SampleNet(out prevRx, out prevTx);
             prevNetAt = DateTime.UtcNow;
+            LoadPending();
 
             while (!stop)
             {
                 DateTime tickAt = DateTime.UtcNow;
+                double nowUnix = NowUnix();
+                string actState = Native.IdleSeconds() >= (uint)idleAfter ? "idle" : "active";
+                bool online = false;
                 try
                 {
                     if ((DateTime.UtcNow - statAt).TotalSeconds >= StaticEverySec || statAt == DateTime.MinValue)
@@ -327,6 +340,7 @@ namespace Hostwatch
 
                     string json = BuildReport();
                     string reply = Post(config.Server + "/api/report", json);
+                    online = true;
 
                     // A label changed on the dashboard comes back here.
                     double replyAt = Json.GetNum(reply, "label_set_at", 0);
@@ -339,6 +353,7 @@ namespace Hostwatch
                             config.Save();
                         }
                     }
+                    idleAfter = (int)Json.GetNum(reply, "idle_after", idleAfter);
                     if (Json.GetStr(reply, "command") == "clear_cache") Native.ClearMemory();
                     bool good = Json.GetBool(reply, "ok");
                     SetStatus(good, good ? "sent " + DateTime.Now.ToString("HH:mm:ss")
@@ -349,12 +364,90 @@ namespace Hostwatch
                     SetStatus(false, "error: " + ex.Message);
                 }
 
+                // Offline: keep a local active/idle log and flush it once the server is back.
+                if (online)
+                {
+                    if (pending.Count > 0 && SendBackfill())
+                    {
+                        pending.Clear();
+                        try { if (File.Exists(pendingPath)) File.Delete(pendingPath); } catch { }
+                    }
+                }
+                else
+                {
+                    AppendActivity(nowUnix, actState);
+                    if (nowUnix - lastPendingSave >= 10) { SavePending(); lastPendingSave = nowUnix; }
+                }
+
                 double left = IntervalMs - (DateTime.UtcNow - tickAt).TotalMilliseconds;
                 if (left > 0) wake.WaitOne((int)left);
             }
+            if (pending.Count > 0) SavePending();
         }
 
         static void SetStatus(bool good, string text) { lock (gate) { ok = good; status = text; } }
+
+        // ---------- offline activity buffer ----------
+        static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+
+        static void AppendActivity(double ts, string state)
+        {
+            Seg last = pending.Count > 0 ? pending[pending.Count - 1] : null;
+            if (last != null && last.State == state && ts - last.To <= MaxGapSec && ts >= last.To)
+                last.To = ts;
+            else
+                pending.Add(new Seg { From = ts, To = ts, State = state });
+            double cutoff = ts - 7 * 86400;
+            pending.RemoveAll(seg => seg.To < cutoff);
+        }
+
+        static void SavePending()
+        {
+            try
+            {
+                StringBuilder sb = new StringBuilder();
+                foreach (Seg s in pending)
+                    sb.Append(s.From.ToString(Inv)).Append(',').Append(s.To.ToString(Inv)).Append(',').Append(s.State).Append('\n');
+                File.WriteAllText(pendingPath, sb.ToString());
+            }
+            catch { }
+        }
+
+        static void LoadPending()
+        {
+            try
+            {
+                if (!File.Exists(pendingPath)) return;
+                foreach (string line in File.ReadAllLines(pendingPath))
+                {
+                    string[] parts = line.Split(',');
+                    if (parts.Length != 3) continue;
+                    double from, to;
+                    if (double.TryParse(parts[0], NumberStyles.Any, Inv, out from) &&
+                        double.TryParse(parts[1], NumberStyles.Any, Inv, out to))
+                        pending.Add(new Seg { From = from, To = to, State = parts[2] });
+                }
+            }
+            catch { }
+        }
+
+        static bool SendBackfill()
+        {
+            try
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.Append("{\"id\":").Append(Json.Str(stat.Mac)).Append(",\"segments\":[");
+                for (int i = 0; i < pending.Count; i++)
+                {
+                    Seg s = pending[i];
+                    if (i > 0) sb.Append(',');
+                    sb.Append('[').Append(Json.Num(s.From)).Append(',').Append(Json.Num(s.To)).Append(',').Append(Json.Str(s.State)).Append(']');
+                }
+                sb.Append("]}");
+                return Json.GetBool(Post(config.Server + "/api/report/backfill", sb.ToString()), "ok");
+            }
+            catch { return false; }
+        }
 
         static void CollectStatic()
         {

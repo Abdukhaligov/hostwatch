@@ -131,6 +131,53 @@ def record_activity(agent: dict, now: float, idle_seconds: float) -> None:
         segments.pop(0)
 
 
+def classify_segment(start: float, end: float, state: str, work: dict) -> list:
+    """Split an active/idle span at work-hour boundaries, marking off-hours parts as 'off'."""
+    tz = _zone(work["tz"])
+    points = [start, end]
+    day = datetime.fromtimestamp(start, tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    while day.timestamp() < end:
+        for interval in work["intervals"]:
+            for hhmm in interval:
+                try:
+                    moment = (day + timedelta(minutes=_minutes(hhmm))).timestamp()
+                except (ValueError, TypeError):
+                    continue
+                if start < moment < end:
+                    points.append(moment)
+        day += timedelta(days=1)
+    points = sorted(set(points))
+    pieces = []
+    for a, b in zip(points, points[1:]):
+        kind = state if in_work_hours((a + b) / 2, work) else "off"
+        pieces.append([a, b, kind])
+    return pieces
+
+
+def backfill_segments(agent: dict, raw: list) -> int:
+    """Merge agent-recorded history (gathered while the server was unreachable)."""
+    work = work_config()
+    pieces = []
+    for item in raw:
+        try:
+            a, b, state = float(item[0]), float(item[1]), str(item[2])
+        except (ValueError, IndexError, TypeError):
+            continue
+        if b > a and state in ("active", "idle"):
+            pieces += classify_segment(a, b, state, work)
+    if not pieces:
+        return 0
+    merged = []
+    for a, b, state in sorted((agent.get("segments") or []) + pieces):
+        if merged and merged[-1][2] == state and a - merged[-1][1] <= MAX_GAP:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b, state])
+    cutoff = day_start(time.time()) - (TIMELINE_DAYS - 1) * 86400
+    agent["segments"] = [seg for seg in merged if seg[1] >= cutoff]
+    return len(pieces)
+
+
 def day_summary(agent: dict, start: float, end: float) -> dict:
     """Active/idle totals and segments of one agent, clipped to [start, end)."""
     clipped = []
@@ -320,11 +367,24 @@ def ingest(body: dict, ip: Optional[str]) -> dict:
         hist = agent.setdefault(key, [])
         hist.append(num(value))
         del hist[:-HISTORY_SECONDS]
-    response = {"ok": True, "label": agent.get("label"), "label_set_at": num(agent.get("label_set_at"))}
+    response = {"ok": True, "label": agent.get("label"), "label_set_at": num(agent.get("label_set_at")),
+                "idle_after": IDLE_AFTER}
     command = agent.pop("command", None)
     if command:
         response["command"] = command
     return response
+
+
+@app.post("/api/report/backfill")
+async def report_backfill(request: Request) -> dict:
+    """Agent-recorded active/idle history buffered while this server was unreachable."""
+    body = await request.json()
+    agent_id = str(body.get("id") or "").lower()
+    agent = agents.get(agent_id)
+    if agent is None:
+        return {"ok": False, "error": "unknown agent"}
+    added = backfill_segments(agent, body.get("segments") or [])
+    return {"ok": True, "added": added}
 
 
 @app.post("/api/agents/{agent_id}/command")
