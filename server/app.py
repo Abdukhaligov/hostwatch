@@ -372,6 +372,10 @@ def ingest(body: dict, ip: Optional[str]) -> dict:
     command = agent.pop("command", None)
     if command:
         response["command"] = command
+    # Centrally retarget every agent: set "server_url" in config.json and agents adopt it.
+    server_url = str(load_config().get("server_url") or "")
+    if server_url.startswith("http"):
+        response["server_url"] = server_url
     return response
 
 

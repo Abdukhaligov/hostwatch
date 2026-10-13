@@ -226,7 +226,7 @@ namespace Hostwatch
 
     class Program
     {
-        const string Version = "2.4";
+        const string Version = "2.5";
         const int IntervalMs = 1000;
         const int StaticEverySec = 60;
 
@@ -354,6 +354,17 @@ namespace Hostwatch
                         }
                     }
                     idleAfter = (int)Json.GetNum(reply, "idle_after", idleAfter);
+
+                    // Central retarget: the server can hand out a new address for every agent at once.
+                    string pushed = (Json.GetStr(reply, "server_url") ?? "").TrimEnd('/');
+                    if (pushed.Length > 0 && !IsLoopback(pushed) &&
+                        !string.Equals(pushed, config.Server, StringComparison.OrdinalIgnoreCase))
+                    {
+                        lock (gate) { config.Server = pushed; config.Save(); }
+                        SetAutostart(exePath, config.Server);
+                        SetStatus(true, "server -> " + pushed);
+                    }
+
                     if (Json.GetStr(reply, "command") == "clear_cache") Native.ClearMemory();
                     bool good = Json.GetBool(reply, "ok");
                     SetStatus(good, good ? "sent " + DateTime.Now.ToString("HH:mm:ss")
