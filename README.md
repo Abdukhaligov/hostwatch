@@ -20,28 +20,57 @@
 
 ## Сервер
 
-Нужен Python 3.9+ или Docker. Подойдёт любая машина в сети.
+Подойдёт любая машина в сети: Windows, Mac или Linux. Нужен Python 3.9+
+(или Docker).
 
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -r server/requirements.txt
-cd server
-../.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8765
+**Windows.** Поставь Python с [python.org](https://www.python.org/downloads/),
+при установке отметь **Add python.exe to PATH**. Потом в папке проекта:
+
+```
+run.cmd
 ```
 
-Или через Docker: `docker compose up -d --build`.
-
-Панель: `http://<IP сервера>:8765`. Данные хранятся в `server/data/` (или в
-`data/` при запуске через Docker).
-
-Если сервер на Windows, открой порт (один раз, от администратора):
+Один раз открой порт в брандмауэре (cmd от администратора), иначе агенты не
+достучатся:
 
 ```
 netsh advfirewall firewall add rule name=hostwatch dir=in action=allow protocol=TCP localport=8765
 ```
 
-Настройки через переменные окружения: `HOSTWATCH_IDLE_AFTER` (120 с),
-`HOSTWATCH_STALE_AFTER` (30 с).
+**Mac / Linux:**
+
+```bash
+./run.sh
+```
+
+При первом запуске скрипт сам создаст `.venv` и поставит зависимости, дальше
+просто запускает сервер. Остановить — `Ctrl+C`. Если обновились зависимости
+(`server/requirements.txt`), удали папку `.venv` и запусти снова.
+
+**Docker:** `docker compose up -d --build`.
+
+Панель: `http://<IP сервера>:8765`. Данные хранятся в `server/data/` (при
+Docker — в `data/`).
+
+### Пароль
+
+С самого сервера (`http://localhost:8765`) панель открывается без пароля. С
+других устройств браузер спросит пароль (имя пользователя любое). Пароль
+лежит в `server/config.json` (при Docker — `data/config.json`):
+
+```json
+{
+  "password": "придумай-пароль"
+}
+```
+
+Образец — `server/config.example.json`. Пароль подхватывается без
+перезапуска. Пока файла нет, панель открыта только на сервере. Агентам пароль
+не нужен: отчёты и скачивание `install.cmd` работают без него. При запуске
+через Docker пароль спрашивается и на самом сервере.
+
+Настройки через переменные окружения: `HOSTWATCH_PORT` (8765),
+`HOSTWATCH_IDLE_AFTER` (120 с), `HOSTWATCH_STALE_AFTER` (30 с).
 
 ## Агент (на каждом Windows-компьютере)
 
@@ -67,9 +96,9 @@ netsh advfirewall firewall add rule name=hostwatch dir=in action=allow protocol=
 
 Чтобы посмотреть панель без настоящих агентов (или сделать скриншоты):
 
-```bash
-cd server
-HOSTWATCH_DEMO=1 ../.venv/bin/uvicorn app:app --port 8765
+```
+run.cmd demo      (Windows)
+./run.sh demo     (Mac / Linux)
 ```
 
 Запустится выдуманный офис из 8 компьютеров с историей за неделю. В демо-режиме

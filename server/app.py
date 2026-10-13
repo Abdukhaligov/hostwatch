@@ -7,11 +7,13 @@ flags problems and serves a dashboard at /.
 """
 from __future__ import annotations
 
+import base64
 import ipaddress
 import json
 import logging
 import os
 import re
+import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,6 +25,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 DATA_PATH = Path(os.environ.get("HOSTWATCH_DATA", "data/agents.json"))
+CONFIG_PATH = Path(os.environ.get("HOSTWATCH_CONFIG", "config.json"))   # {"password": "..."}
 STALE_AFTER = int(os.environ.get("HOSTWATCH_STALE_AFTER", "30"))   # s without a report -> offline
 IDLE_AFTER = int(os.environ.get("HOSTWATCH_IDLE_AFTER", "120"))    # s without input -> idle
 ALLOW_PUBLIC = os.environ.get("HOSTWATCH_ALLOW_PUBLIC", "") == "1"
@@ -175,17 +178,58 @@ async def lifespan(_: FastAPI):
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
 
 
-@app.middleware("http")
-async def lan_only(request: Request, call_next):
-    """Reports and the dashboard describe internal machines - keep them on the LAN."""
-    if not ALLOW_PUBLIC:
+_config_cache: dict = {"mtime": None, "password": None}
+
+
+def dashboard_password() -> Optional[str]:
+    """Re-read config.json when it changes, so a new password works without a restart."""
+    try:
+        mtime = CONFIG_PATH.stat().st_mtime
+    except OSError:
+        return None
+    if mtime != _config_cache["mtime"]:
         try:
-            client = ipaddress.ip_address(request.client.host if request.client else "")
-            allowed = client.is_private or client.is_loopback
-        except ValueError:
-            allowed = False
-        if not allowed:
-            return PlainTextResponse("hostwatch is LAN-only", status_code=403)
+            password = json.loads(CONFIG_PATH.read_text(encoding="utf-8")).get("password")
+        except (OSError, ValueError, AttributeError):
+            password = None
+        _config_cache.update(mtime=mtime, password=str(password) if password else None)
+    return _config_cache["password"]
+
+
+def password_ok(request: Request, password: str) -> bool:
+    scheme, _, encoded = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() != "basic":
+        return False
+    try:
+        _user, _, given = base64.b64decode(encoded).decode("utf-8").partition(":")
+    except ValueError:
+        return False
+    return secrets.compare_digest(given.encode(), password.encode())
+
+
+@app.middleware("http")
+async def access_control(request: Request, call_next):
+    """LAN only. The dashboard is open on the server machine itself and needs the
+    password from config.json anywhere else; agents report and download without it."""
+    try:
+        client = ipaddress.ip_address(request.client.host if request.client else "")
+    except ValueError:
+        client = None
+    if not ALLOW_PUBLIC and not (client and (client.is_private or client.is_loopback)):
+        return PlainTextResponse("hostwatch is LAN-only", status_code=403)
+
+    path = request.url.path
+    agent_traffic = (request.method == "POST" and path == "/api/report") or path.startswith("/agent/")
+    if agent_traffic or (client and client.is_loopback):
+        return await call_next(request)
+
+    password = dashboard_password()
+    if not password:
+        return PlainTextResponse(f"Dashboard is only open on the server itself. Set a password in {CONFIG_PATH} "
+                                 'to allow other devices: {"password": "..."}', status_code=403)
+    if not password_ok(request, password):
+        return PlainTextResponse("Password required", status_code=401,
+                                 headers={"WWW-Authenticate": 'Basic realm="hostwatch", charset="UTF-8"'})
     return await call_next(request)
 
 

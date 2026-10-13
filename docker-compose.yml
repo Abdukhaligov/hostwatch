@@ -11,3 +11,4 @@ services:
       - ./data:/data
     environment:
       HOSTWATCH_DATA: /data/agents.json
+      HOSTWATCH_CONFIG: /data/config.json
