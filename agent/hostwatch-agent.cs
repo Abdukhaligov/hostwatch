@@ -18,6 +18,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace Hostwatch
 {
@@ -193,18 +194,17 @@ namespace Hostwatch
         [STAThread]
         static void Main(string[] args)
         {
-            bool created;
-            Mutex mutex = new Mutex(true, "Local\\HostwatchAgent", out created);
-            if (!created) return;
-
             string dir = System.IO.Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Hostwatch");
             Directory.CreateDirectory(dir);
+            string target = System.IO.Path.Combine(dir, "hostwatch.exe");
             config = new Config(System.IO.Path.Combine(dir, "config.json"));
 
             for (int i = 0; i < args.Length - 1; i++)
                 if (args[i].Equals("-Server", StringComparison.OrdinalIgnoreCase))
                 { config.Server = args[i + 1].TrimEnd('/'); config.Save(); }
+
+            if (Array.IndexOf(args, "-uninstall") >= 0) { Uninstall(dir); return; }
 
             if (string.IsNullOrEmpty(config.Server))
             {
@@ -214,6 +214,25 @@ namespace Hostwatch
                 config.Server = answer.TrimEnd('/');
                 config.Save();
             }
+
+            // Run from %LOCALAPPDATA%\Hostwatch and start at every logon. When launched from
+            // anywhere else (the downloaded copy), install into place and hand off to it.
+            string self = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
+            bool installed = string.Equals(self, target, StringComparison.OrdinalIgnoreCase);
+            SetAutostart(target, config.Server);
+            if (!installed)
+            {
+                foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcessesByName("hostwatch"))
+                    if (p.Id != System.Diagnostics.Process.GetCurrentProcess().Id)
+                        try { p.Kill(); p.WaitForExit(3000); } catch { }
+                try { File.Copy(self, target, true); } catch { }
+                try { System.Diagnostics.Process.Start(target, "-Server \"" + config.Server + "\""); } catch { }
+                return;
+            }
+
+            bool created;
+            Mutex mutex = new Mutex(true, "Local\\HostwatchAgent", out created);
+            if (!created) return;
 
             ServicePointManager.Expect100Continue = false;
             try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072; } catch { }
@@ -461,6 +480,7 @@ namespace Hostwatch
             menu.Items.Add("Open dashboard").Click += delegate { try { System.Diagnostics.Process.Start(config.Server); } catch { } };
             menu.Items.Add("Change server...").Click += OnServer;
             menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Uninstall").Click += OnUninstall;
             menu.Items.Add("Exit").Click += delegate { tray.Visible = false; Application.Exit(); };
             menu.Opening += delegate { miStatus.Text = StatusLine(); };
             tray.ContextMenuStrip = menu;
@@ -508,6 +528,17 @@ namespace Hostwatch
             }
         }
 
+        static void OnUninstall(object sender, EventArgs e)
+        {
+            if (MessageBox.Show("Remove hostwatch from this PC?", "hostwatch",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            string dir = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Hostwatch");
+            tray.Visible = false;
+            Uninstall(dir);
+            Application.Exit();
+        }
+
         static void OnServer(object sender, EventArgs e)
         {
             string answer = Microsoft.VisualBasic.Interaction.InputBox(
@@ -544,6 +575,39 @@ namespace Hostwatch
             string[] parts = new string[b.Length];
             for (int i = 0; i < b.Length; i++) parts[i] = b[i].ToString("x2");
             return string.Join(":", parts);
+        }
+
+        const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+
+        static void SetAutostart(string target, string server)
+        {
+            try
+            {
+                using (RegistryKey run = Registry.CurrentUser.OpenSubKey(RunKey, true))
+                    if (run != null) run.SetValue("Hostwatch", "\"" + target + "\" -Server \"" + server + "\"");
+            }
+            catch { }
+        }
+
+        static void Uninstall(string dir)
+        {
+            try
+            {
+                using (RegistryKey run = Registry.CurrentUser.OpenSubKey(RunKey, true))
+                    if (run != null) run.DeleteValue("Hostwatch", false);
+            }
+            catch { }
+            foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcessesByName("hostwatch"))
+                if (p.Id != System.Diagnostics.Process.GetCurrentProcess().Id)
+                    try { p.Kill(); } catch { }
+            // Delete the folder after we exit (the running exe can't delete itself directly).
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe",
+                    "/c timeout /t 2 >nul & rmdir /s /q \"" + dir + "\"")
+                { WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden, CreateNoWindow = true });
+            }
+            catch { }
         }
 
         static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);

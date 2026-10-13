@@ -34,7 +34,7 @@ DEMO = os.environ.get("HOSTWATCH_DEMO", "") == "1"   # fake office for screensho
 HERE = Path(__file__).parent
 STATIC_DIR = HERE / "static"
 AGENT_DIR = HERE / "agent" if (HERE / "agent").exists() else HERE.parent / "agent"
-AGENT_FILES = ("hostwatch.exe", "install.cmd", "uninstall.cmd")
+AGENT_FILES = ("hostwatch.exe",)
 HISTORY_SECONDS = 900      # CPU/network samples kept (~15 min at one report per second)
 SPARK_POINTS = 120         # samples shown on the cards (~2 min)
 CPU_HOT_SECONDS = 120      # CPU ≥90% for this long is a problem
