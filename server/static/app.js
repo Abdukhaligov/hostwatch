@@ -72,7 +72,7 @@ function card(a, now) {
       ${a.status === 'offline' ? `<button class="icon-btn" data-act="forget" data-id="${esc(a.id)}" title="Remove from list">✕</button>` : ''}
     </div>
     ${a.problems.length ? `<div class="problems">${a.problems.map((p) => `<span>▲ ${esc(p)}</span>`).join('')}</div>` : ''}
-    <div class="net"><b>${esc(a.ip || a.ip_seen || '—')}</b> · ${esc(a.mac || a.id)}${primary.name ? ` · ${esc(primary.name)}` : ''}${fmtSpeed(primary.speed) ? ` · ${fmtSpeed(primary.speed)}` : ''}</div>
+    <div class="net"><b>${esc(a.ip || a.ip_seen || '—')}</b>${(a.ip || a.ip_seen) ? ` <button class="mini" data-act="rdp" data-ip="${esc(a.ip || a.ip_seen)}" data-host="${esc(name)}" title="Open Remote Desktop (RDP) to this PC">RDP</button>` : ''} · ${esc(a.mac || a.id)}${primary.name ? ` · ${esc(primary.name)}` : ''}${fmtSpeed(primary.speed) ? ` · ${fmtSpeed(primary.speed)}` : ''}</div>
     <div class="metric"><div class="row"><span>CPU</span><b>${cpu.percent != null ? `${Math.round(cpu.percent)}%` : '—'} of ${cpu.cores || '?'} cores / ${cpu.threads || '?'} threads</b></div>
       <div class="bar"><i class="${level(cpu.percent)}" style="width:${Math.min(100, cpu.percent || 0)}%"></i></div>
       ${spark(a.cpu_hist)}<div class="sub">${esc(cpu.name || '')}</div></div>
@@ -148,6 +148,15 @@ $('#grid').addEventListener('click', async (e) => {
     await fetch(`api/agents/${encodeURIComponent(b.dataset.id)}/label`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label }),
     });
+  } else if (b.dataset.act === 'rdp') {
+    const rdp = [`full address:s:${b.dataset.ip}:3389`, 'prompt for credentials:i:1',
+      'screen mode id:i:2', 'authentication level:i:2', ''].join('\r\n');
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([rdp], { type: 'application/x-rdp' }));
+    link.download = `${(b.dataset.host || b.dataset.ip).replace(/[^\w.-]+/g, '_')}.rdp`;
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+    return;
   } else if (b.dataset.act === 'clearcache') {
     b.textContent = 'sent';
     await fetch(`api/agents/${encodeURIComponent(b.dataset.id)}/command`, {
