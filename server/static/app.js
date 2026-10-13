@@ -10,6 +10,7 @@ let pollTimer = null;
 let tab = 'computers';
 let idleDay = null;      // null = today
 let idleTimer = null;
+let lastWork = null;
 
 function fmtBytes(b) {
   if (b == null) return '—';
@@ -49,6 +50,7 @@ function card(a, now) {
   const name = a.label || a.hostname || a.id;
   const bad = a.problems.length && a.status !== 'offline';
   const stateText = a.status === 'offline' ? `OFFLINE ${fmtDur(now - a.seen)}`
+    : a.status === 'off' ? 'OFF-HOURS'
     : a.status === 'idle' ? `IDLE ${fmtDur(a.idle_seconds)}` : 'ACTIVE';
   const cpu = a.cpu || {};
   const mem = a.memory || {};
@@ -92,7 +94,7 @@ function netBlock(a) {
 
 function rank(a) {
   if (a.problems.length && a.status !== 'offline') return 0;
-  return { active: 1, idle: 2, offline: 3 }[a.status] ?? 4;
+  return { active: 1, idle: 2, off: 3, offline: 4 }[a.status] ?? 5;
 }
 
 function render() {
@@ -107,7 +109,8 @@ function render() {
   const count = (s) => all.filter((a) => a.status === s).length;
   const problems = all.filter((a) => a.problems.length && a.status !== 'offline').length;
   $('#counts').innerHTML = `${all.length} PCs · <b style="color:var(--green)">${count('active')} active</b> · `
-    + `<b style="color:var(--amber)">${count('idle')} idle</b> · <b style="color:var(--dim)">${count('offline')} offline</b> · `
+    + `<b style="color:var(--amber)">${count('idle')} idle</b> · <b style="color:var(--slate)">${count('off')} off-hours</b> · `
+    + `<b style="color:var(--dim)">${count('offline')} offline</b> · `
     + `<b style="color:${problems ? 'var(--red)' : 'var(--dim)'}">${problems} with problems</b>`;
   document.title = problems ? `(${problems}) HOSTWATCH` : 'HOSTWATCH';
 }
@@ -155,21 +158,54 @@ $('#grid').addEventListener('click', async (e) => {
 // ---------- idle tab ----------
 const hhmm = (ts) => new Date(ts * 1000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 
-function timeline(r, start, end, now) {
-  const span = end - start;
-  const segs = r.segments.map(([a, b, state]) => `<i class="seg ${state}" style="left:${((a - start) / span * 100).toFixed(3)}%;width:${Math.max(0.15, (b - a) / span * 100).toFixed(3)}%" title="${state} ${hhmm(a)}–${hhmm(b)}"></i>`).join('');
-  const nowLine = now < end ? `<i class="nowline" style="left:${((now - start) / span * 100).toFixed(2)}%"></i>` : '';
-  return `<div class="tl">${segs}${nowLine}</div>`;
+const toMin = (hhmm) => { const [h, m] = hhmm.split(':'); return (+h) * 60 + (+m); };
+
+// The timeline spans only the work schedule: from the first interval's start to the last one's end.
+function workMinutes(work) {
+  const intervals = (work && work.intervals && work.intervals.length) ? work.intervals : [['00:00', '24:00']];
+  return [Math.min(...intervals.map((iv) => toMin(iv[0]))), Math.max(...intervals.map((iv) => toMin(iv[1])))];
+}
+
+function workBands(work, lo, hi) {
+  const span = hi - lo;
+  if (!work || !work.intervals || span <= 0) return '';
+  return work.intervals.map(([a, b]) => `<i class="work" style="left:${((toMin(a) - lo) / span * 100).toFixed(3)}%;width:${((toMin(b) - toMin(a)) / span * 100).toFixed(3)}%"></i>`).join('');
+}
+
+function timeline(r, start, now, work) {
+  const [lo, hi] = workMinutes(work);
+  const winStart = start + lo * 60, winEnd = start + hi * 60, span = winEnd - winStart || 1;
+  const segs = r.segments.map(([a, b, state]) => {
+    const from = Math.max(a, winStart), to = Math.min(b, winEnd);
+    if (to <= from) return '';
+    return `<i class="seg ${state}" style="left:${((from - winStart) / span * 100).toFixed(3)}%;width:${Math.max(0.15, (to - from) / span * 100).toFixed(3)}%" title="${state} ${hhmm(a)}–${hhmm(b)}"></i>`;
+  }).join('');
+  const nowLine = winStart <= now && now < winEnd ? `<i class="nowline" style="left:${((now - winStart) / span * 100).toFixed(2)}%"></i>` : '';
+  return `<div class="tl">${workBands(work, lo, hi)}${segs}${nowLine}</div>`;
+}
+
+function workAxis(work) {
+  const [lo, hi] = workMinutes(work);
+  const span = hi - lo || 1;
+  const spanH = span / 60;
+  const step = spanH <= 10 ? 1 : spanH <= 20 ? 2 : 3;
+  const ticks = [];
+  for (let h = Math.ceil(lo / 60); h <= Math.floor(hi / 60); h += step) ticks.push(h);
+  return ticks.map((h) => {
+    const left = (h * 60 - lo) / span * 100;
+    const shift = left <= 1 ? '0' : left >= 99 ? '-100%' : '-50%';
+    return `<span style="left:${left.toFixed(2)}%;transform:translateX(${shift})">${String(h).padStart(2, '0')}</span>`;
+  }).join('');
 }
 
 function renderIdle(d) {
   $('#idle-after').textContent = Math.round(d.idle_after / 60);
+  lastWork = d.work;
+  if ($('#work-editor').hidden) $('#work-info').textContent =
+    `${d.work.tz} · ${d.work.intervals.map(([a, b]) => `${a}\u2013${b}`).join(', ')}`;
   $('#days').innerHTML = d.days.map((day, i) => `<button data-day="${day}" class="${day === d.day ? 'on' : ''}">${i === 0 ? 'TODAY' : i === 1 ? 'YESTERDAY' : day.slice(5)}</button>`).join('');
   const rows = d.rows.slice().sort((a, b) => b.idle - a.idle || String(a.name).localeCompare(String(b.name)));
-  const axis = [0, 3, 6, 9, 12, 15, 18, 21, 24].map((h) => {
-    const shift = h === 0 ? '0' : h === 24 ? '-100%' : '-50%';   // keep the end labels inside the bar
-    return `<span style="left:${(h / 24) * 100}%;transform:translateX(${shift})">${String(h).padStart(2, '0')}</span>`;
-  }).join('');
+  const axis = workAxis(d.work);
   const head = `<div class="irow head"><span>COMPUTER</span><span class="num">ACTIVE</span><span class="num">IDLE</span>
     <span class="num">IDLE SHARE</span><span class="num">LONGEST IDLE</span><div class="tlcell"><div class="tl-axis">${axis}</div></div></div>`;
   $('#idle-rows').innerHTML = rows.length ? head + rows.map((r) => {
@@ -183,7 +219,7 @@ function renderIdle(d) {
       <span class="num" style="color:var(--amber)">${fmtDur(r.idle)}</span>
       <div class="pct"><div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div><span>${Math.round(pct)}%</span></div>
       <span class="num">${r.longest_idle ? fmtDur(r.longest_idle) : '—'}</span>
-      <div class="tlcell">${timeline(r, d.start, d.end, d.ts)}</div>
+      <div class="tlcell">${timeline(r, d.start, d.ts, d.work)}</div>
     </div>`;
   }).join('') : '<div class="empty"><p>No data for this day yet.</p></div>';
 }
@@ -214,6 +250,56 @@ $('#days').addEventListener('click', (e) => {
   if (!b) return;
   idleDay = b.dataset.day === $('#days button').dataset.day ? null : b.dataset.day;
   pollIdle();
+});
+
+// ---------- work-hours editor ----------
+const intervalRow = (a = '09:00', b = '18:00') =>
+  `<div class="we-row"><input type="time" value="${a}"> <span>–</span> <input type="time" value="${b}"> <button class="we-del" title="Remove">×</button></div>`;
+
+function openWorkEditor() {
+  const work = lastWork || { tz: 'Asia/Baku', intervals: [['09:00', '12:00'], ['14:00', '18:00']] };
+  $('#work-editor').innerHTML = `
+    <label class="we-tz">Timezone <input id="we-tz" value="${esc(work.tz)}" spellcheck="false"></label>
+    <div id="we-rows">${work.intervals.map(([a, b]) => intervalRow(a, b)).join('')}</div>
+    <button id="we-add" class="chip">+ interval</button>
+    <div class="we-err" id="we-err"></div>
+    <div class="we-actions"><button id="we-save" class="chip on">Save</button><button id="we-cancel" class="chip">Cancel</button></div>`;
+  $('#work-editor').hidden = false;
+  $('#work-info').hidden = true;
+  $('#work-edit').hidden = true;
+}
+
+function closeWorkEditor() {
+  $('#work-editor').hidden = true;
+  $('#work-editor').innerHTML = '';
+  $('#work-info').hidden = false;
+  $('#work-edit').hidden = false;
+}
+
+async function saveWork() {
+  const tz = $('#we-tz').value.trim();
+  const intervals = [...document.querySelectorAll('#we-rows .we-row')]
+    .map((row) => [...row.querySelectorAll('input[type=time]')].map((i) => i.value))
+    .filter(([a, b]) => a && b);
+  const err = $('#we-err');
+  if (!intervals.length) { err.textContent = 'Add at least one interval.'; return; }
+  try {
+    const response = await fetch('api/settings/work', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tz, intervals }),
+    });
+    const data = await response.json();
+    if (!data.ok) { err.textContent = data.error || 'Could not save.'; return; }
+    closeWorkEditor();
+    pollIdle();
+  } catch { err.textContent = 'Could not reach the server.'; }
+}
+
+$('#work-edit').addEventListener('click', openWorkEditor);
+$('#work-editor').addEventListener('click', (e) => {
+  if (e.target.id === 'we-add') $('#we-rows').insertAdjacentHTML('beforeend', intervalRow());
+  else if (e.target.classList.contains('we-del')) e.target.closest('.we-row').remove();
+  else if (e.target.id === 'we-cancel') closeWorkEditor();
+  else if (e.target.id === 'we-save') saveWork();
 });
 
 try {

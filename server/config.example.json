@@ -1,3 +1,7 @@
 {
-  "password": "change-me"
+  "password": "change-me",
+  "work": {
+    "tz": "Asia/Baku",
+    "intervals": [["09:00", "12:00"], ["14:00", "18:00"]]
+  }
 }

@@ -17,8 +17,14 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
 
 import asyncio
 from fastapi import FastAPI, Request
@@ -40,6 +46,7 @@ SPARK_POINTS = 120         # samples shown on the cards (~2 min)
 CPU_HOT_SECONDS = 120      # CPU ≥90% for this long is a problem
 TIMELINE_DAYS = 7          # active/idle history kept per PC
 MAX_GAP = 10               # s between reports still counted as continuous
+DEFAULT_WORK = {"tz": "Asia/Baku", "intervals": [["09:00", "12:00"], ["14:00", "18:00"]]}
 
 agents: dict[str, dict] = {}   # agent id (primary MAC) -> {report, seen, label, ...}
 
@@ -90,7 +97,8 @@ def view_of(agent_id: str, agent: dict, now: float) -> dict:
         "label": agent.get("label"),
         "seen": agent.get("seen"),
         "first_seen": agent.get("first_seen"),
-        "status": "offline" if not online else "idle" if idle >= IDLE_AFTER else "active",
+        "status": ("offline" if not online else "off" if not in_work_hours(now)
+                   else "idle" if idle >= IDLE_AFTER else "active"),
         "problems": problems_of(agent, now),
         "cpu_hist": (agent.get("cpu_hist") or [])[-SPARK_POINTS:],
         "rx_hist": (agent.get("rx_hist") or [])[-SPARK_POINTS:],
@@ -111,7 +119,7 @@ def record_activity(agent: dict, now: float, idle_seconds: float) -> None:
     agent["last_report_at"] = now
     if not last or not 0 < now - last <= MAX_GAP:
         return
-    state = "idle" if idle_seconds >= IDLE_AFTER else "active"
+    state = "off" if not in_work_hours(now) else "idle" if idle_seconds >= IDLE_AFTER else "active"
     segments = agent.setdefault("segments", [])
     if segments and segments[-1][2] == state and last - segments[-1][1] <= MAX_GAP:
         segments[-1][1] = now
@@ -125,14 +133,14 @@ def record_activity(agent: dict, now: float, idle_seconds: float) -> None:
 def day_summary(agent: dict, start: float, end: float) -> dict:
     """Active/idle totals and segments of one agent, clipped to [start, end)."""
     clipped = []
-    totals = {"active": 0.0, "idle": 0.0}
+    totals = {"active": 0.0, "idle": 0.0, "off": 0.0}
     longest = 0.0
     for a, b, state in agent.get("segments") or []:
         a, b = max(a, start), min(b, end)
         if b <= a:
             continue
         clipped.append([a, b, state])
-        totals[state] += b - a
+        totals[state] = totals.get(state, 0.0) + (b - a)
         if state == "idle":
             longest = max(longest, b - a)
     return {"active": totals["active"], "idle": totals["idle"], "longest_idle": longest, "segments": clipped}
@@ -179,22 +187,70 @@ async def lifespan(_: FastAPI):
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
 
 
-_config_cache: dict = {"mtime": None, "password": None}
+_config: dict = {"mtime": None, "data": {}}
 
 
-def dashboard_password() -> Optional[str]:
-    """Re-read config.json when it changes, so a new password works without a restart."""
+def load_config() -> dict:
+    """config.json (password + work hours), re-read whenever the file changes."""
     try:
         mtime = CONFIG_PATH.stat().st_mtime
     except OSError:
-        return None
-    if mtime != _config_cache["mtime"]:
+        _config["mtime"], _config["data"] = None, {}
+        return _config["data"]
+    if mtime != _config["mtime"]:
         try:
-            password = json.loads(CONFIG_PATH.read_text(encoding="utf-8")).get("password")
-        except (OSError, ValueError, AttributeError):
-            password = None
-        _config_cache.update(mtime=mtime, password=str(password) if password else None)
-    return _config_cache["password"]
+            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        _config["mtime"] = mtime
+        _config["data"] = data if isinstance(data, dict) else {}
+    return _config["data"]
+
+
+def save_config(data: dict) -> None:
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _config["mtime"] = None   # reload on next read
+
+
+def dashboard_password() -> Optional[str]:
+    password = load_config().get("password")
+    return str(password) if password else None
+
+
+def work_config() -> dict:
+    work = load_config().get("work") or {}
+    intervals = work.get("intervals")
+    if not isinstance(intervals, list) or not intervals:
+        intervals = DEFAULT_WORK["intervals"]
+    return {"tz": work.get("tz") or DEFAULT_WORK["tz"], "intervals": intervals}
+
+
+def _zone(name: str):
+    if ZoneInfo:
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            pass
+    return timezone(timedelta(hours=4))   # Baku, no DST
+
+
+def _minutes(hhmm: str) -> int:
+    hours, _, minutes = str(hhmm).partition(":")
+    return int(hours) * 60 + int(minutes)
+
+
+def in_work_hours(ts: float, work: Optional[dict] = None) -> bool:
+    work = work or work_config()
+    local = datetime.fromtimestamp(ts, _zone(work["tz"]))
+    minutes = local.hour * 60 + local.minute
+    for interval in work["intervals"]:
+        try:
+            if _minutes(interval[0]) <= minutes < _minutes(interval[1]):
+                return True
+        except (ValueError, IndexError, TypeError):
+            continue
+    return False
 
 
 def password_ok(request: Request, password: str) -> bool:
@@ -289,7 +345,7 @@ def forget(agent_id: str) -> dict:
 def agents_list() -> dict:
     now = time.time()
     return {"ts": now, "idle_after": IDLE_AFTER, "stale_after": STALE_AFTER,
-            "agents": [view_of(k, v, now) for k, v in agents.items()]}
+            "work": work_config(), "agents": [view_of(k, v, now) for k, v in agents.items()]}
 
 
 @app.get("/api/idle")
@@ -319,7 +375,39 @@ def idle_report(day: Optional[str] = None) -> dict:
             **summary,
         })
     return {"ts": now, "day": time.strftime("%Y-%m-%d", time.localtime(start)), "start": start, "end": end,
-            "days": days, "idle_after": IDLE_AFTER, "rows": rows}
+            "days": days, "idle_after": IDLE_AFTER, "work": work_config(), "rows": rows}
+
+
+@app.get("/api/settings")
+def get_settings() -> dict:
+    return {"work": work_config(), "idle_after": IDLE_AFTER}
+
+
+@app.post("/api/settings/work")
+async def set_work(request: Request) -> dict:
+    body = await request.json()
+    tz = str(body.get("tz") or "").strip() or DEFAULT_WORK["tz"]
+    if ZoneInfo:
+        try:
+            ZoneInfo(tz)
+        except Exception:
+            return {"ok": False, "error": "unknown timezone"}
+    intervals = []
+    for interval in body.get("intervals") or []:
+        try:
+            start_min, end_min = _minutes(interval[0]), _minutes(interval[1])
+        except (ValueError, IndexError, TypeError):
+            return {"ok": False, "error": "times must be HH:MM"}
+        if not (0 <= start_min < end_min <= 24 * 60):
+            return {"ok": False, "error": "each interval must be start < end within a day"}
+        intervals.append([f"{start_min // 60:02d}:{start_min % 60:02d}",
+                          f"{end_min // 60:02d}:{end_min % 60:02d}"])
+    if not intervals:
+        return {"ok": False, "error": "at least one interval is required"}
+    data = load_config()
+    data["work"] = {"tz": tz, "intervals": intervals[:6]}
+    save_config(data)
+    return {"ok": True, "work": work_config()}
 
 
 @app.get("/agent/{name}")

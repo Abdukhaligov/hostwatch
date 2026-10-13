@@ -7,7 +7,7 @@
 <title>HOSTWATCH</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="static/style.css">
+<link rel="stylesheet" href="static/style.css?v=3">
 </head>
 <body>
 <header>
@@ -28,6 +28,7 @@
     <button data-f="problems">PROBLEMS</button>
     <button data-f="active">ACTIVE</button>
     <button data-f="idle">IDLE</button>
+    <button data-f="off">OFF-HOURS</button>
     <button data-f="offline">OFFLINE</button>
   </nav>
   <div id="grid" class="grid"></div>
@@ -43,11 +44,18 @@
   <nav class="filters" id="days"></nav>
   <div class="idle-legend">
     <span><i class="sw active"></i>active</span><span><i class="sw idle"></i>idle (no input for <b id="idle-after">2</b> min)</span>
+    <span><i class="sw offhours"></i>off-hours (not counted)</span>
     <span><i class="sw off"></i>offline / no data</span>
   </div>
+  <div class="workbar">
+    <span class="wlabel">WORK HOURS</span>
+    <span id="work-info"></span>
+    <button id="work-edit" class="chip">✎ EDIT</button>
+  </div>
+  <div id="work-editor" hidden></div>
   <div id="idle-rows"></div>
 </main>
 
-<script src="static/app.js"></script>
+<script src="static/app.js?v=3"></script>
 </body>
 </html>
