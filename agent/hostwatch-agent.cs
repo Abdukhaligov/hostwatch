@@ -77,6 +77,41 @@ namespace Hostwatch
             if (GlobalMemoryStatusEx(m)) { total = m.ullTotalPhys; used = m.ullTotalPhys - m.ullAvailPhys; }
             else { total = 0; used = 0; }
         }
+
+        [DllImport("kernel32.dll")]
+        static extern uint WTSGetActiveConsoleSessionId();
+        [DllImport("wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool WTSQuerySessionInformation(IntPtr server, uint sessionId, int infoClass, out IntPtr buffer, out uint bytes);
+        [DllImport("wtsapi32.dll")]
+        static extern void WTSFreeMemory(IntPtr memory);
+
+        static string WtsString(uint session, int infoClass)   // 5 = WTSUserName, 7 = WTSDomainName
+        {
+            IntPtr buffer; uint bytes;
+            if (WTSQuerySessionInformation(IntPtr.Zero, session, infoClass, out buffer, out bytes) && buffer != IntPtr.Zero)
+                try { return Marshal.PtrToStringUni(buffer) ?? ""; } finally { WTSFreeMemory(buffer); }
+            return "";
+        }
+
+        // The person actually logged in at the console, regardless of which account runs the agent.
+        public static string ConsoleUser()
+        {
+            try
+            {
+                uint session = WTSGetActiveConsoleSessionId();
+                if (session != 0xFFFFFFFF)
+                {
+                    string user = WtsString(session, 5);
+                    if (!string.IsNullOrEmpty(user))
+                    {
+                        string domain = WtsString(session, 7);
+                        return (string.IsNullOrEmpty(domain) ? "" : domain + "\\") + user;
+                    }
+                }
+            }
+            catch { }
+            return Environment.UserDomainName + "\\" + Environment.UserName;
+        }
     }
 
     // Minimal JSON writing (report) and reading (config + server reply).
@@ -174,7 +209,7 @@ namespace Hostwatch
 
     class Program
     {
-        const string Version = "2.0";
+        const string Version = "2.1";
         const int IntervalMs = 1000;
         const int StaticEverySec = 60;
 
@@ -417,7 +452,7 @@ namespace Hostwatch
             sb.Append("{\"id\":").Append(Json.Str(stat.Mac));
             sb.Append(",\"agent_version\":").Append(Json.Str(Version));
             sb.Append(",\"hostname\":").Append(Json.Str(Environment.MachineName));
-            sb.Append(",\"user\":").Append(Json.Str(Environment.UserDomainName + "\\" + Environment.UserName));
+            sb.Append(",\"user\":").Append(Json.Str(Native.ConsoleUser()));
             sb.Append(",\"os\":").Append(Json.Str(stat.Os));
             sb.Append(",\"model\":").Append(Json.Str(stat.Model));
             sb.Append(",\"ip\":").Append(Json.Str(stat.Ip));
