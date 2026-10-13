@@ -11,6 +11,7 @@ let tab = 'computers';
 let idleDay = null;      // null = today
 let idleTimer = null;
 let lastWork = null;
+let holdRenderUntil = 0;   // pause grid re-render briefly so a click isn't lost to a refresh
 
 function fmtBytes(b) {
   if (b == null) return '—';
@@ -98,7 +99,7 @@ function rank(a) {
 }
 
 function render() {
-  if (!last) return;
+  if (!last || Date.now() < holdRenderUntil) return;
   const now = last.ts;
   const all = last.agents.slice().sort((a, b) => rank(a) - rank(b)
     || String(a.label || a.hostname).localeCompare(String(b.label || b.hostname)));
@@ -136,6 +137,10 @@ $('#filters').addEventListener('click', (e) => {
   filter = b.dataset.f;
   for (const x of document.querySelectorAll('#filters button')) x.classList.toggle('on', x === b);
   render();
+});
+
+$('#grid').addEventListener('pointerdown', (e) => {
+  if (e.target.closest('[data-act]')) holdRenderUntil = Date.now() + 1500;
 });
 
 $('#grid').addEventListener('click', async (e) => {

@@ -19,6 +19,8 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using System.Security.AccessControl;
+using System.Security.Principal;
 
 namespace Hostwatch
 {
@@ -226,7 +228,7 @@ namespace Hostwatch
 
     class Program
     {
-        const string Version = "2.6";
+        const string Version = "2.9";
         const int IntervalMs = 1000;
         const int StaticEverySec = 60;
 
@@ -236,6 +238,7 @@ namespace Hostwatch
 
         static Config config;
         static string exePath = "";
+        static bool machineInstall = false;   // installed for all users (ProgramData + HKLM) vs per-user
         static int idleAfter = 120;    // server's idle threshold, learned from the report reply
         static string pendingPath = "";
         static readonly System.Collections.Generic.List<Seg> pending = new System.Collections.Generic.List<Seg>();
@@ -250,29 +253,47 @@ namespace Hostwatch
         static DateTime statAt = DateTime.MinValue;
         static ulong prevIdle, prevBusy;
         static long prevRx, prevTx;
+        static double ownRxBytes, ownTxBytes;      // our own traffic to the server, excluded from net_io
+        static double prevOwnRx, prevOwnTx;
+        const int HttpOverhead = 300;              // rough headers/TCP per request, each direction
         static DateTime prevNetAt;
 
         [STAThread]
         static void Main(string[] args)
         {
-            string dir = System.IO.Path.Combine(
+            // Per-user install keeps everything in LOCALAPPDATA; an all-users install keeps the exe,
+            // config and offline buffer in ProgramData so they are shared, not tied to one account.
+            string localDir = System.IO.Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Hostwatch");
-            Directory.CreateDirectory(dir);
-            string target = System.IO.Path.Combine(dir, "hostwatch.exe");
-            pendingPath = System.IO.Path.Combine(dir, "pending.txt");
-            config = new Config(System.IO.Path.Combine(dir, "config.json"));
+            string machineDir = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Hostwatch");
+            string localTarget = System.IO.Path.Combine(localDir, "hostwatch.exe");
+            string machineTarget = System.IO.Path.Combine(machineDir, "hostwatch.exe");
+
+            string self = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
+            exePath = self;
+            bool runningMachine = string.Equals(self, machineTarget, StringComparison.OrdinalIgnoreCase);
+            bool installed = runningMachine || string.Equals(self, localTarget, StringComparison.OrdinalIgnoreCase);
+            bool askedMachine = Array.IndexOf(args, "-allusers") >= 0;
+
+            // Installing for all users needs admin to write ProgramData/HKLM: elevate first.
+            if (!installed && askedMachine && !IsElevated()) { RelaunchElevated(args); return; }
+
+            machineInstall = installed ? runningMachine : (askedMachine || IsElevated());
+            string dataDir = machineInstall ? machineDir : localDir;
+            try { Directory.CreateDirectory(dataDir); } catch { }
+            pendingPath = System.IO.Path.Combine(dataDir, "pending.txt");
+            config = new Config(System.IO.Path.Combine(dataDir, "config.json"));
 
             // The saved server is the source of truth: -Server only seeds it when nothing usable is
-            // saved yet, so changing the server from the tray survives reboots (the autostart command
-            // still passes -Server every time, but it no longer overrides a real address the user set).
-            // A loopback address is never reachable from a client, so treat it as "not set" and let a
-            // redeploy with the right -Server heal PCs that got stuck on 127.0.0.1.
+            // saved yet, so changing the server from the tray survives reboots. A loopback address is
+            // never reachable from a client, so treat it as "not set" and let a redeploy heal it.
             if (string.IsNullOrEmpty(config.Server) || IsLoopback(config.Server))
                 for (int i = 0; i < args.Length - 1; i++)
                     if (args[i].Equals("-Server", StringComparison.OrdinalIgnoreCase))
                     { config.Server = args[i + 1].TrimEnd('/'); config.Save(); break; }
 
-            if (Array.IndexOf(args, "-uninstall") >= 0) { Uninstall(dir); return; }
+            if (Array.IndexOf(args, "-uninstall") >= 0) { Uninstall(); return; }
 
             if (string.IsNullOrEmpty(config.Server))
             {
@@ -283,14 +304,13 @@ namespace Hostwatch
                 config.Save();
             }
 
-            // Run from %LOCALAPPDATA%\Hostwatch and start at every logon. When launched from
-            // anywhere else (the downloaded copy), install into place and hand off to it.
-            string self = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
-            exePath = self;
-            bool installed = string.Equals(self, target, StringComparison.OrdinalIgnoreCase);
-            SetAutostart(target, config.Server);
+            // Already in place? Refresh the matching autostart and run. Otherwise this is the
+            // downloaded copy: install into place (per-user, or all-users when elevated) and hand off.
             if (!installed)
             {
+                string target = machineInstall ? machineTarget : localTarget;
+                if (machineInstall) GrantUsersWrite(dataDir);   // standard users must be able to save config
+                SetAutostart(machineInstall, target, config.Server);
                 foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcessesByName("hostwatch"))
                     if (p.Id != System.Diagnostics.Process.GetCurrentProcess().Id)
                         try { p.Kill(); p.WaitForExit(3000); } catch { }
@@ -299,8 +319,11 @@ namespace Hostwatch
                 return;
             }
 
+            SetAutostart(machineInstall, self, config.Server);
+
+            // One agent per user for a per-user install; one per machine for an all-users install.
             bool created;
-            Mutex mutex = new Mutex(true, "Local\\HostwatchAgent", out created);
+            Mutex mutex = new Mutex(true, machineInstall ? "Global\\HostwatchAgent" : "Local\\HostwatchAgent", out created);
             if (!created) return;
 
             ServicePointManager.Expect100Continue = false;
@@ -324,6 +347,7 @@ namespace Hostwatch
         {
             Native.CpuTimes(out prevIdle, out prevBusy);
             SampleNet(out prevRx, out prevTx);
+            prevOwnRx = ownRxBytes; prevOwnTx = ownTxBytes;
             prevNetAt = DateTime.UtcNow;
             LoadPending();
 
@@ -361,7 +385,7 @@ namespace Hostwatch
                         !string.Equals(pushed, config.Server, StringComparison.OrdinalIgnoreCase))
                     {
                         lock (gate) { config.Server = pushed; config.Save(); }
-                        SetAutostart(exePath, config.Server);
+                        SetAutostart(machineInstall, exePath, config.Server);
                         SetStatus(true, "server -> " + pushed);
                     }
 
@@ -571,9 +595,11 @@ namespace Hostwatch
             SampleNet(out rx, out tx);
             DateTime now = DateTime.UtcNow;
             double secs = (now - prevNetAt).TotalSeconds;
-            double rxBps = secs > 0 ? Math.Max(0, rx - prevRx) / secs : 0;
-            double txBps = secs > 0 ? Math.Max(0, tx - prevTx) / secs : 0;
-            prevRx = rx; prevTx = tx; prevNetAt = now;
+            // Subtract our own chatter with the server so the dashboard shows real PC network load.
+            double ownRxDelta = ownRxBytes - prevOwnRx, ownTxDelta = ownTxBytes - prevOwnTx;
+            double rxBps = secs > 0 ? Math.Max(0, (rx - prevRx) - ownRxDelta) / secs : 0;
+            double txBps = secs > 0 ? Math.Max(0, (tx - prevTx) - ownTxDelta) / secs : 0;
+            prevRx = rx; prevTx = tx; prevOwnRx = ownRxBytes; prevOwnTx = ownTxBytes; prevNetAt = now;
 
             string label; double labelAt;
             lock (gate) { label = config.Label; labelAt = config.LabelSetAt; }
@@ -615,10 +641,15 @@ namespace Hostwatch
             req.KeepAlive = false;
             byte[] bytes = Encoding.UTF8.GetBytes(json);
             req.ContentLength = bytes.Length;
+            ownTxBytes += bytes.Length + HttpOverhead;
             using (Stream s = req.GetRequestStream()) s.Write(bytes, 0, bytes.Length);
             using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
             using (StreamReader sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
-                return sr.ReadToEnd();
+            {
+                string reply = sr.ReadToEnd();
+                ownRxBytes += Encoding.UTF8.GetByteCount(reply) + HttpOverhead;
+                return reply;
+            }
         }
 
         // ---------- tray (UI thread) ----------
@@ -697,10 +728,8 @@ namespace Hostwatch
         {
             if (MessageBox.Show("Remove hostwatch from this PC?", "hostwatch",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
-            string dir = System.IO.Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Hostwatch");
             tray.Visible = false;
-            Uninstall(dir);
+            Uninstall();
             Application.Exit();
         }
 
@@ -711,7 +740,7 @@ namespace Hostwatch
             if (!string.IsNullOrEmpty(answer))
             {
                 lock (gate) { config.Server = answer.TrimEnd('/'); config.Save(); }
-                SetAutostart(exePath, config.Server);   // keep the autostart command in sync
+                SetAutostart(machineInstall, exePath, config.Server);   // keep the autostart command in sync
                 wake.Set();
             }
         }
@@ -745,32 +774,76 @@ namespace Hostwatch
 
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
-        static void SetAutostart(string target, string server)
+        static bool IsElevated()
         {
             try
             {
-                using (RegistryKey run = Registry.CurrentUser.OpenSubKey(RunKey, true))
-                    if (run != null) run.SetValue("Hostwatch", "\"" + target + "\" -Server \"" + server + "\"");
+                using (WindowsIdentity id = WindowsIdentity.GetCurrent())
+                    return new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator);
+            }
+            catch { return false; }
+        }
+
+        static void RelaunchElevated(string[] args)
+        {
+            try
+            {
+                StringBuilder line = new StringBuilder();
+                foreach (string a in args)
+                {
+                    if (line.Length > 0) line.Append(' ');
+                    line.Append(a.IndexOf(' ') >= 0 ? "\"" + a + "\"" : a);
+                }
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                    System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName, line.ToString())
+                { Verb = "runas", UseShellExecute = true });
+            }
+            catch { }   // user declined the UAC prompt
+        }
+
+        static void GrantUsersWrite(string dir)
+        {
+            try
+            {
+                DirectoryInfo info = new DirectoryInfo(dir);
+                DirectorySecurity security = info.GetAccessControl();
+                security.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                    FileSystemRights.Modify | FileSystemRights.Synchronize,
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                    PropagationFlags.None, AccessControlType.Allow));
+                info.SetAccessControl(security);
             }
             catch { }
         }
 
-        static void Uninstall(string dir)
+        static void SetAutostart(bool allUsers, string target, string server)
         {
             try
             {
-                using (RegistryKey run = Registry.CurrentUser.OpenSubKey(RunKey, true))
-                    if (run != null) run.DeleteValue("Hostwatch", false);
+                RegistryKey root = allUsers ? Registry.LocalMachine : Registry.CurrentUser;
+                using (RegistryKey run = root.OpenSubKey(RunKey, true))
+                    if (run != null) run.SetValue("Hostwatch", "\"" + target + "\" -Server \"" + server + "\"");
             }
             catch { }
+            if (allUsers)   // drop a per-user leftover so it doesn't start twice
+                try { using (RegistryKey run = Registry.CurrentUser.OpenSubKey(RunKey, true)) if (run != null) run.DeleteValue("Hostwatch", false); } catch { }
+        }
+
+        static void Uninstall()
+        {
+            foreach (RegistryKey root in new[] { Registry.CurrentUser, Registry.LocalMachine })
+                try { using (RegistryKey run = root.OpenSubKey(RunKey, true)) if (run != null) run.DeleteValue("Hostwatch", false); } catch { }
             foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcessesByName("hostwatch"))
                 if (p.Id != System.Diagnostics.Process.GetCurrentProcess().Id)
                     try { p.Kill(); } catch { }
-            // Delete the folder after we exit (the running exe can't delete itself directly).
+            // Delete the folders after we exit (the running exe can't delete itself directly).
+            string localDir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Hostwatch");
+            string machineDir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Hostwatch");
             try
             {
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe",
-                    "/c timeout /t 2 >nul & rmdir /s /q \"" + dir + "\"")
+                    "/c timeout /t 2 >nul & rmdir /s /q \"" + localDir + "\" & rmdir /s /q \"" + machineDir + "\"")
                 { WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden, CreateNoWindow = true });
             }
             catch { }

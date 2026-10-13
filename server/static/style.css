@@ -59,9 +59,9 @@ main { max-width: 1600px; margin: 0 auto; padding: 18px 20px 40px; }
 .pc-name { flex: 1; min-width: 0; }
 .pc-name h3 { font-family: Orbitron, sans-serif; font-weight: 500; font-size: 14px; letter-spacing: 0.05em; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pc-name p { font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.icon-btn { background: none; border: 0; color: var(--dim); font: inherit; font-size: 13px; cursor: pointer; padding: 2px 4px; }
+.icon-btn { background: none; border: 0; color: var(--dim); font: inherit; font-size: 15px; cursor: pointer; padding: 3px 7px; }
 .icon-btn:hover { color: var(--text); }
-.mini { font: inherit; font-size: 9.5px; letter-spacing: 0.08em; color: var(--dim); background: none; border: 1px solid var(--line); padding: 0 5px; margin-left: 4px; cursor: pointer; vertical-align: 1px; }
+.mini { font: inherit; font-size: 11px; letter-spacing: 0.08em; color: var(--dim); background: none; border: 1px solid var(--line); padding: 2px 8px; margin-left: 5px; cursor: pointer; vertical-align: 1px; }
 .mini:hover { color: var(--cyan); border-color: var(--cyan); }
 #day-pick { font: inherit; font-size: 11px; letter-spacing: 0.06em; color: var(--cyan); background: #02070c; border: 1px solid var(--line); padding: 4px 8px; cursor: pointer; }
 #day-pick:hover { border-color: var(--cyan); }
