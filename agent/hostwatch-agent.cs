@@ -122,6 +122,18 @@ namespace Hostwatch
             catch { return -1; }
         }
 
+        [DllImport("advapi32.dll", SetLastError = true)]
+        static extern bool GetTokenInformation(IntPtr token, int infoClass, out int info, int length, out int returned);
+
+        // UAC split token: an admin's normal (non-elevated) logon token is "limited" and has a
+        // linked elevated token. TokenElevationType = 18, TokenElevationTypeLimited = 3.
+        public static bool IsLimitedAdminToken(IntPtr token)
+        {
+            int type, len;
+            try { return GetTokenInformation(token, 18, out type, 4, out len) && type == 3; }
+            catch { return false; }
+        }
+
         [DllImport("psapi.dll")]
         static extern bool EmptyWorkingSet(IntPtr process);
 
@@ -194,6 +206,7 @@ namespace Hostwatch
         public string Server = "";
         public string Label = "";
         public double LabelSetAt = 0;
+        public string Token = "";
         public string Path;
 
         public Config(string path)
@@ -207,6 +220,7 @@ namespace Hostwatch
                     Server = Json.GetStr(json, "server") ?? "";
                     Label = Json.GetStr(json, "label") ?? "";
                     LabelSetAt = Json.GetNum(json, "label_set_at", 0);
+                    Token = Json.GetStr(json, "token") ?? "";
                 }
             }
             catch { }
@@ -218,7 +232,8 @@ namespace Hostwatch
             {
                 string json = "{\n  \"server\": " + Json.Str(Server) +
                               ",\n  \"label\": " + Json.Str(Label) +
-                              ",\n  \"label_set_at\": " + Json.Num(LabelSetAt) + "\n}\n";
+                              ",\n  \"label_set_at\": " + Json.Num(LabelSetAt) +
+                              ",\n  \"token\": " + Json.Str(Token) + "\n}\n";
                 File.WriteAllText(Path, json, new UTF8Encoding(false));
             }
             catch { }
@@ -238,6 +253,8 @@ namespace Hostwatch
         const string Version = "2.14";
         const int IntervalMs = 1000;
         const int StaticEverySec = 60;
+        // Fixed path for fetching this server's report token (same constant lives in server/app.py).
+        const string EnrollKey = "b9f3c1a7e24d4f08a1c6e5d20f7b8a3c6d9e4f1028b7c5a3e6f90d2c4b8a1e7f3";
 
         const double MaxGapSec = 10;   // matches the server; samples within this join one segment
 
@@ -281,12 +298,11 @@ namespace Hostwatch
             exePath = self;
             bool runningMachine = string.Equals(self, machineTarget, StringComparison.OrdinalIgnoreCase);
             bool installed = runningMachine || string.Equals(self, localTarget, StringComparison.OrdinalIgnoreCase);
-            bool askedMachine = Array.IndexOf(args, "-allusers") >= 0;
+            // The downloaded copy only ever installs for all users (ProgramData/HKLM), which needs
+            // admin: elevate first, and install nothing if the UAC prompt is declined.
+            if (!installed && !IsElevated()) { RelaunchElevated(args); return; }
 
-            // Installing for all users needs admin to write ProgramData/HKLM: elevate first.
-            if (!installed && askedMachine && !IsElevated()) { RelaunchElevated(args); return; }
-
-            machineInstall = installed ? runningMachine : (askedMachine || IsElevated());
+            machineInstall = installed ? runningMachine : true;
             string dataDir = machineInstall ? machineDir : localDir;
             try { Directory.CreateDirectory(dataDir); } catch { }
             pendingPath = System.IO.Path.Combine(dataDir, "pending.txt");
@@ -311,18 +327,25 @@ namespace Hostwatch
                 config.Save();
             }
 
-            // Already in place? Refresh the matching autostart and run. Otherwise this is the
-            // downloaded copy: install into place (per-user, or all-users when elevated) and hand off.
+            // Already in place? Refresh the autostart and run. Otherwise this is the downloaded
+            // installer: replace any prior install with this fresh all-users copy, then hand off.
             if (!installed)
             {
-                string target = machineInstall ? machineTarget : localTarget;
-                if (machineInstall) { GrantUsersWrite(dataDir); ConfigureShadow(); }   // standard users can save config; allow RDP shadow
-                SetAutostart(machineInstall, target, config.Server);
+                GrantUsersWrite(dataDir); ConfigureShadow();   // standard users can save config; allow RDP shadow
+
+                // Reinstall over whatever is there: stop every running agent (any user's session),
+                // and drop a stale per-user autostart so the old LOCALAPPDATA copy can't start
+                // alongside the new one. SetAutostart writes the HKLM entry for the new copy.
                 foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcessesByName("hostwatch"))
                     if (p.Id != System.Diagnostics.Process.GetCurrentProcess().Id)
                         try { p.Kill(); p.WaitForExit(3000); } catch { }
-                try { File.Copy(self, target, true); } catch { }
-                try { System.Diagnostics.Process.Start(target, "-Server \"" + config.Server + "\""); } catch { }
+                SetAutostart(true, machineTarget, config.Server);
+                try { File.Copy(self, machineTarget, true); } catch { }
+                try { System.Diagnostics.Process.Start(machineTarget, "-Server \"" + config.Server + "\""); } catch { }
+
+                // The download is only an installer, and any old per-user copy is now orphaned.
+                // Remove both once this process exits (a running exe can't delete its own file).
+                CleanupAfterExit(self, localDir);
                 return;
             }
 
@@ -373,9 +396,14 @@ namespace Hostwatch
                     if ((DateTime.UtcNow - statAt).TotalSeconds >= StaticEverySec || statAt == DateTime.MinValue)
                         CollectStatic();
 
+                    EnsureToken();
                     string json = BuildReport();
                     string reply = Post(config.Server + "/api/report", json);
                     online = true;
+
+                    // Token rejected (rotated, or the server's config was reset): drop it and re-enroll.
+                    if (!Json.GetBool(reply, "ok") && (Json.GetStr(reply, "error") ?? "").Contains("unauthorized"))
+                        lock (gate) { config.Token = ""; config.Save(); }
 
                     // A label changed on the dashboard comes back here.
                     double replyAt = Json.GetNum(reply, "label_set_at", 0);
@@ -661,6 +689,7 @@ namespace Hostwatch
             HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
             req.Method = "POST";
             req.ContentType = "application/json; charset=utf-8";
+            req.Headers["X-Agent-Token"] = config.Token ?? "";
             req.Timeout = 3000;
             req.ReadWriteTimeout = 3000;
             req.KeepAlive = false;
@@ -677,6 +706,27 @@ namespace Hostwatch
             }
         }
 
+        // Fetch and store this server's report token if we don't have one yet. The enrollment path
+        // is a fixed secret baked into the exe, so any install can bootstrap without a password.
+        static void EnsureToken()
+        {
+            if (!string.IsNullOrEmpty(config.Token)) return;
+            try
+            {
+                HttpWebRequest req = (HttpWebRequest)WebRequest.Create(config.Server + "/api/enroll/" + EnrollKey);
+                req.Timeout = 3000;
+                req.ReadWriteTimeout = 3000;
+                req.KeepAlive = false;
+                using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+                using (StreamReader sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                {
+                    string tok = Json.GetStr(sr.ReadToEnd(), "token");
+                    if (!string.IsNullOrEmpty(tok)) lock (gate) { config.Token = tok; config.Save(); }
+                }
+            }
+            catch { }   // server down or unreachable: try again next tick
+        }
+
         // ---------- tray (UI thread) ----------
         static NotifyIcon tray;
         static ToolStripItem miStatus, miTimes;
@@ -685,16 +735,16 @@ namespace Hostwatch
         static string shownText = "";
 
         // Is the logged-in user a member of the local Administrators group (even when not elevated)?
+        // id.Groups skips deny-only SIDs, and in a non-elevated admin token (autostart at logon)
+        // Administrators is exactly that, so check for the UAC "limited" split token instead.
         static bool UserIsAdmin()
         {
             try
             {
                 using (WindowsIdentity id = WindowsIdentity.GetCurrent())
                 {
-                    SecurityIdentifier admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-                    if (id.Groups != null)
-                        foreach (IdentityReference g in id.Groups)
-                            if (g == admins) return true;
+                    if (new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator)) return true;
+                    return Native.IsLimitedAdminToken(id.Token);
                 }
             }
             catch { }
@@ -870,7 +920,11 @@ namespace Hostwatch
                     System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName, line.ToString())
                 { Verb = "runas", UseShellExecute = true });
             }
-            catch { }   // user declined the UAC prompt
+            catch   // user declined the UAC prompt
+            {
+                MessageBox.Show("hostwatch needs administrator rights to install.\nRun it again and allow the prompt.",
+                    "hostwatch", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         // Set up RDP shadowing on this PC so an admin can just download SHADOW and connect:
@@ -940,6 +994,22 @@ namespace Hostwatch
             {
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe",
                     "/c timeout /t 2 >nul & rmdir /s /q \"" + localDir + "\" & rmdir /s /q \"" + machineDir + "\"")
+                { WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden, CreateNoWindow = true });
+            }
+            catch { }
+        }
+
+        // After this process exits, delete the finished installer and an orphaned per-user folder.
+        // A running exe can't remove its own file, so hand it to a short detached cmd that waits
+        // for us to quit first. rmdir/del on a missing path just no-op, so a first-ever install is fine.
+        static void CleanupAfterExit(string installerFile, string oldUserDir)
+        {
+            try
+            {
+                string cmd = "/c timeout /t 2 >nul";
+                if (!string.IsNullOrEmpty(oldUserDir)) cmd += " & rmdir /s /q \"" + oldUserDir + "\"";
+                if (!string.IsNullOrEmpty(installerFile)) cmd += " & del /f /q \"" + installerFile + "\"";
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", cmd)
                 { WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden, CreateNoWindow = true });
             }
             catch { }

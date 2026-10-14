@@ -49,6 +49,11 @@ MAX_GAP = 10               # s between reports still counted as continuous
 DEFAULT_WORK = {"tz": "Asia/Baku", "intervals": [["09:00", "12:00"], ["14:00", "18:00"]]}
 COMMANDS = ("clear_cache",)   # remote actions the dashboard can queue for an agent
 
+# Agents bootstrap their report token from this fixed, hard-to-guess path (the same constant is
+# baked into hostwatch-agent.cs). It only gates fetching the token, not the reports themselves, so
+# a long static value is enough here; the per-server token below is what every report must carry.
+ENROLL_KEY = "b9f3c1a7e24d4f08a1c6e5d20f7b8a3c6d9e4f1028b7c5a3e6f90d2c4b8a1e7f3"
+
 agents: dict[str, dict] = {}   # agent id (primary MAC) -> {report, seen, label, ...}
 
 
@@ -226,6 +231,7 @@ async def lifespan(_: FastAPI):
         task = asyncio.create_task(demo.run())
     else:
         load()
+        agent_token()   # generate and persist the report token on first run
         task = asyncio.create_task(save_loop())
     yield
     task.cancel()
@@ -264,6 +270,26 @@ def save_config(data: dict) -> None:
 def dashboard_password() -> Optional[str]:
     password = load_config().get("password")
     return str(password) if password else None
+
+
+def agent_token() -> str:
+    """The secret every agent must present on /api/report. Generated once into config.json and
+    then left untouched, so it survives restarts and the file can be moved to another machine."""
+    data = load_config()
+    token = data.get("agent_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        data["agent_token"] = token
+        save_config(data)
+    return str(token)
+
+
+def token_ok(request: Request) -> bool:
+    """A report is trusted if it carries the server's token (always true in demo mode)."""
+    if DEMO:
+        return True
+    given = request.headers.get("x-agent-token", "")
+    return secrets.compare_digest(given.encode(), agent_token().encode())
 
 
 def work_config() -> dict:
@@ -324,7 +350,8 @@ async def access_control(request: Request, call_next):
         return PlainTextResponse("hostwatch is LAN-only", status_code=403)
 
     path = request.url.path
-    agent_traffic = (request.method == "POST" and path.startswith("/api/report")) or path.startswith("/agent/")
+    agent_traffic = ((request.method == "POST" and path.startswith("/api/report"))
+                     or path.startswith("/agent/") or path.startswith("/api/enroll/"))
     if agent_traffic or (client and client.is_loopback):
         return await call_next(request)
 
@@ -338,8 +365,18 @@ async def access_control(request: Request, call_next):
     return await call_next(request)
 
 
+@app.get("/api/enroll/{key}")
+def enroll(key: str):
+    """Hands an agent the report token, if it knows the baked-in enrollment path."""
+    if not secrets.compare_digest(key.encode(), ENROLL_KEY.encode()):
+        return PlainTextResponse("not found", status_code=404)
+    return {"token": agent_token()}
+
+
 @app.post("/api/report")
 async def report(request: Request) -> dict:
+    if not token_ok(request):
+        return {"ok": False, "error": "unauthorized"}
     return ingest(await request.json(), request.client.host if request.client else None)
 
 
@@ -387,6 +424,8 @@ def ingest(body: dict, ip: Optional[str]) -> dict:
 @app.post("/api/report/backfill")
 async def report_backfill(request: Request) -> dict:
     """Agent-recorded active/idle history buffered while this server was unreachable."""
+    if not token_ok(request):
+        return {"ok": False, "error": "unauthorized"}
     body = await request.json()
     agent_id = str(body.get("id") or "").lower()
     agent = agents.get(agent_id)
