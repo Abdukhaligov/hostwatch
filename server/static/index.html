@@ -7,7 +7,7 @@
 <title>HOSTWATCH</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="static/style.css?v=10">
+<link rel="stylesheet" href="static/style.css">
 </head>
 <body>
 <header>
@@ -52,10 +52,16 @@
     <span id="work-info"></span>
     <button id="work-edit" class="chip">✎ EDIT</button>
   </div>
+  <div class="workbar" id="export">
+    <span class="wlabel">EXPORT CSV</span>
+    <input type="date" id="ex-start" title="From"> <span>–</span> <input type="date" id="ex-end" title="To">
+    <button class="chip" data-kind="summary" title="One row per PC per day: active / idle totals">⬇ PER DAY</button>
+    <button class="chip" data-kind="segments" title="Every active / idle / off-hours span with start and end time">⬇ SEGMENTS</button>
+  </div>
   <div id="work-editor" hidden></div>
   <div id="idle-rows"></div>
 </main>
 
-<script src="static/app.js?v=10"></script>
+<script src="static/app.js"></script>
 </body>
 </html>

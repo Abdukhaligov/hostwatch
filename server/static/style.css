@@ -140,6 +140,7 @@ main[hidden] { display: none; }
 .workbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 11.5px; color: var(--dim); margin: -4px 0 16px; }
 .workbar .wlabel { letter-spacing: 0.14em; }
 .workbar #work-info { color: var(--text); }
+#export input { font: inherit; font-size: 11px; background: #02070c; color: var(--text); border: 1px solid var(--line); padding: 2px 6px; color-scheme: dark; }
 .chip { font: inherit; font-size: 11px; letter-spacing: 0.08em; color: var(--cyan); background: none; border: 1px solid var(--line); padding: 3px 9px; cursor: pointer; }
 .chip:hover, .chip.on { border-color: var(--cyan); background: rgba(0, 229, 255, 0.08); }
 #work-editor { border: 1px solid var(--line); padding: 14px; margin: -4px 0 18px; max-width: 460px; background: rgba(6, 16, 23, 0.6); }

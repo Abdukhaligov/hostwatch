@@ -9,6 +9,8 @@ flags problems and serves a dashboard at /.
 from __future__ import annotations
 
 import base64
+import csv
+import io
 import ipaddress
 import json
 import logging
@@ -28,7 +30,7 @@ except ImportError:
 
 import asyncio
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 DATA_PATH = Path(os.environ.get("HOSTWATCH_DATA", "data/agents.json"))
@@ -504,6 +506,79 @@ def idle_report(day: Optional[str] = None) -> dict:
     oldest = time.strftime("%Y-%m-%d", time.localtime(day_start(now) - (TIMELINE_DAYS - 1) * 86400))
     return {"ts": now, "day": time.strftime("%Y-%m-%d", time.localtime(start)), "start": start, "end": end,
             "days": days[:7], "oldest": oldest, "idle_after": IDLE_AFTER, "work": work_config(), "rows": rows}
+
+
+@app.get("/api/idle/export")
+def idle_export(start: Optional[str] = None, end: Optional[str] = None, kind: str = "summary"):
+    """CSV of active/idle history for local days start..end (YYYY-MM-DD, inclusive; default today).
+    kind=summary - one row per PC per day: active, idle and offline (work hours with no reports);
+    kind=segments - every active/idle/off-hours span."""
+    today = time.strftime("%Y-%m-%d")
+    try:
+        first = time.mktime(time.strptime(start or today, "%Y-%m-%d"))
+        last = time.mktime(time.strptime(end or start or today, "%Y-%m-%d"))
+    except ValueError:
+        return PlainTextResponse("start/end must be YYYY-MM-DD", status_code=400)
+    if kind not in ("summary", "segments"):
+        return PlainTextResponse("kind must be summary or segments", status_code=400)
+    first, last = min(first, last), max(first, last)
+
+    def export_name(agent_id: str, agent: dict) -> str:
+        return str(agent.get("label") or (agent.get("report") or {}).get("hostname") or agent_id)
+
+    def work_seconds(start_ts: float, end_ts: float) -> float:
+        if end_ts <= start_ts:
+            return 0.0
+        return sum(b - a for a, b, state in classify_segment(start_ts, end_ts, "work", work) if state == "work")
+
+    def duration(seconds: float) -> str:
+        minutes = round(seconds / 60)
+        return f"{minutes // 60}h {minutes % 60:02d}m"
+
+    def clock(ts: float) -> str:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+    work = work_config()
+    now = time.time()
+    states = {"active": "Active", "idle": "Idle", "off": "Off-hours"}
+    out = io.StringIO()
+    writer = csv.writer(out)
+    if kind == "summary":
+        writer.writerow(["Date", "Name", "Hostname", "User", "MAC", "Active", "Idle", "Offline", "Idle %", "Longest idle"])
+    else:
+        writer.writerow(["Date", "Name", "Hostname", "User", "MAC", "State", "Start", "End", "Duration"])
+    day = first
+    while day <= last:
+        next_day = day_start(day + 86400 + 3600)   # +1h survives DST-shortened days
+        date = time.strftime("%Y-%m-%d", time.localtime(day))
+        for agent_id, agent in sorted(agents.items(), key=lambda item: export_name(*item).lower()):
+            report = agent.get("report") or {}
+            who = [export_name(agent_id, agent), report.get("hostname") or "", report.get("user") or "", agent_id]
+            summary = day_summary(agent, day, next_day)
+            if kind == "summary":
+                # Offline counts only work hours since the PC was first seen and not past now.
+                window_start = max(day, num(agent.get("first_seen"), day))
+                window_end = min(next_day, now)
+                if window_end <= window_start:
+                    continue
+                tracked = summary["active"] + summary["idle"]
+                offline = max(0.0, work_seconds(window_start, window_end) - tracked)
+                writer.writerow([date, *who, duration(summary["active"]), duration(summary["idle"]),
+                                 duration(offline), round(100 * summary["idle"] / tracked, 1) if tracked else 0,
+                                 duration(summary["longest_idle"])])
+            else:
+                for a, b, state in summary["segments"]:
+                    writer.writerow([date, *who, states.get(state, state), clock(a), clock(b), duration(b - a)])
+        day = next_day
+    writer.writerows([[], [], [], []])
+    writer.writerow(["Exported", clock(now)])
+    writer.writerow(["Timezone", work["tz"]])
+    writer.writerow(["Work hours", ", ".join(f"{a}\u2013{b}" for a, b in work["intervals"])])
+    writer.writerow(["Idle after", f"{IDLE_AFTER // 60} min without input"])
+    name = f"hostwatch-{kind}-{time.strftime('%Y-%m-%d', time.localtime(first))}_{time.strftime('%Y-%m-%d', time.localtime(last))}.csv"
+    # BOM so Excel opens non-ASCII names/users as UTF-8
+    return Response("\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @app.get("/api/settings")

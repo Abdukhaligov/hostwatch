@@ -239,6 +239,11 @@ function renderIdle(d) {
       <button data-day="${yesterday}" class="${d.day === yesterday ? 'on' : ''}">YESTERDAY</button>
       <input type="date" id="day-pick" min="${d.oldest}" max="${today}" value="${d.day}" title="Pick a day">`;
   }
+  for (const input of [$('#ex-start'), $('#ex-end')]) {
+    input.min = d.oldest;
+    input.max = d.days[0];
+    if (!input.value) input.value = d.day;
+  }
   const rows = d.rows.slice().sort((a, b) => b.idle - a.idle || String(a.name).localeCompare(String(b.name)));
   const axis = workAxis(d.work);
   const head = `<div class="irow head"><span>COMPUTER</span><span class="num">ACTIVE</span><span class="num">IDLE</span>
@@ -291,6 +296,14 @@ $('#days').addEventListener('change', (e) => {
   if (e.target.id !== 'day-pick' || !e.target.value) return;
   idleDay = e.target.value === $('#days [data-day]').dataset.day ? null : e.target.value;   // today -> live
   pollIdle();
+});
+
+$('#export').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-kind]');
+  if (!b) return;
+  const start = $('#ex-start').value, end = $('#ex-end').value || start;
+  if (!start) return;
+  location.href = `api/idle/export?kind=${b.dataset.kind}&start=${start}&end=${end}`;
 });
 
 // ---------- work-hours editor ----------
