@@ -122,6 +122,18 @@ namespace Hostwatch
             catch { return -1; }
         }
 
+        [DllImport("advapi32.dll", SetLastError = true)]
+        static extern bool GetTokenInformation(IntPtr token, int infoClass, out int info, int length, out int returned);
+
+        // UAC split token: an admin's normal (non-elevated) logon token is "limited" and has a
+        // linked elevated token. TokenElevationType = 18, TokenElevationTypeLimited = 3.
+        public static bool IsLimitedAdminToken(IntPtr token)
+        {
+            int type, len;
+            try { return GetTokenInformation(token, 18, out type, 4, out len) && type == 3; }
+            catch { return false; }
+        }
+
         [DllImport("psapi.dll")]
         static extern bool EmptyWorkingSet(IntPtr process);
 
@@ -281,12 +293,11 @@ namespace Hostwatch
             exePath = self;
             bool runningMachine = string.Equals(self, machineTarget, StringComparison.OrdinalIgnoreCase);
             bool installed = runningMachine || string.Equals(self, localTarget, StringComparison.OrdinalIgnoreCase);
-            bool askedMachine = Array.IndexOf(args, "-allusers") >= 0;
+            // The downloaded copy only ever installs for all users (ProgramData/HKLM), which needs
+            // admin: elevate first, and install nothing if the UAC prompt is declined.
+            if (!installed && !IsElevated()) { RelaunchElevated(args); return; }
 
-            // Installing for all users needs admin to write ProgramData/HKLM: elevate first.
-            if (!installed && askedMachine && !IsElevated()) { RelaunchElevated(args); return; }
-
-            machineInstall = installed ? runningMachine : (askedMachine || IsElevated());
+            machineInstall = installed ? runningMachine : true;
             string dataDir = machineInstall ? machineDir : localDir;
             try { Directory.CreateDirectory(dataDir); } catch { }
             pendingPath = System.IO.Path.Combine(dataDir, "pending.txt");
@@ -311,18 +322,25 @@ namespace Hostwatch
                 config.Save();
             }
 
-            // Already in place? Refresh the matching autostart and run. Otherwise this is the
-            // downloaded copy: install into place (per-user, or all-users when elevated) and hand off.
+            // Already in place? Refresh the autostart and run. Otherwise this is the downloaded
+            // installer: replace any prior install with this fresh all-users copy, then hand off.
             if (!installed)
             {
-                string target = machineInstall ? machineTarget : localTarget;
-                if (machineInstall) { GrantUsersWrite(dataDir); ConfigureShadow(); }   // standard users can save config; allow RDP shadow
-                SetAutostart(machineInstall, target, config.Server);
+                GrantUsersWrite(dataDir); ConfigureShadow();   // standard users can save config; allow RDP shadow
+
+                // Reinstall over whatever is there: stop every running agent (any user's session),
+                // and drop a stale per-user autostart so the old LOCALAPPDATA copy can't start
+                // alongside the new one. SetAutostart writes the HKLM entry for the new copy.
                 foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcessesByName("hostwatch"))
                     if (p.Id != System.Diagnostics.Process.GetCurrentProcess().Id)
                         try { p.Kill(); p.WaitForExit(3000); } catch { }
-                try { File.Copy(self, target, true); } catch { }
-                try { System.Diagnostics.Process.Start(target, "-Server \"" + config.Server + "\""); } catch { }
+                SetAutostart(true, machineTarget, config.Server);
+                try { File.Copy(self, machineTarget, true); } catch { }
+                try { System.Diagnostics.Process.Start(machineTarget, "-Server \"" + config.Server + "\""); } catch { }
+
+                // The download is only an installer, and any old per-user copy is now orphaned.
+                // Remove both once this process exits (a running exe can't delete its own file).
+                CleanupAfterExit(self, localDir);
                 return;
             }
 
@@ -685,16 +703,16 @@ namespace Hostwatch
         static string shownText = "";
 
         // Is the logged-in user a member of the local Administrators group (even when not elevated)?
+        // id.Groups skips deny-only SIDs, and in a non-elevated admin token (autostart at logon)
+        // Administrators is exactly that, so check for the UAC "limited" split token instead.
         static bool UserIsAdmin()
         {
             try
             {
                 using (WindowsIdentity id = WindowsIdentity.GetCurrent())
                 {
-                    SecurityIdentifier admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-                    if (id.Groups != null)
-                        foreach (IdentityReference g in id.Groups)
-                            if (g == admins) return true;
+                    if (new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator)) return true;
+                    return Native.IsLimitedAdminToken(id.Token);
                 }
             }
             catch { }
@@ -870,7 +888,11 @@ namespace Hostwatch
                     System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName, line.ToString())
                 { Verb = "runas", UseShellExecute = true });
             }
-            catch { }   // user declined the UAC prompt
+            catch   // user declined the UAC prompt
+            {
+                MessageBox.Show("hostwatch needs administrator rights to install.\nRun it again and allow the prompt.",
+                    "hostwatch", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         // Set up RDP shadowing on this PC so an admin can just download SHADOW and connect:
@@ -940,6 +962,22 @@ namespace Hostwatch
             {
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe",
                     "/c timeout /t 2 >nul & rmdir /s /q \"" + localDir + "\" & rmdir /s /q \"" + machineDir + "\"")
+                { WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden, CreateNoWindow = true });
+            }
+            catch { }
+        }
+
+        // After this process exits, delete the finished installer and an orphaned per-user folder.
+        // A running exe can't remove its own file, so hand it to a short detached cmd that waits
+        // for us to quit first. rmdir/del on a missing path just no-op, so a first-ever install is fine.
+        static void CleanupAfterExit(string installerFile, string oldUserDir)
+        {
+            try
+            {
+                string cmd = "/c timeout /t 2 >nul";
+                if (!string.IsNullOrEmpty(oldUserDir)) cmd += " & rmdir /s /q \"" + oldUserDir + "\"";
+                if (!string.IsNullOrEmpty(installerFile)) cmd += " & del /f /q \"" + installerFile + "\"";
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", cmd)
                 { WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden, CreateNoWindow = true });
             }
             catch { }
