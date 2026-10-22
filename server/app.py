@@ -1,7 +1,7 @@
 """hostwatch - collects health reports from Windows PCs on the LAN.
 
-Each PC runs agent/hostwatch-agent.cs (built into hostwatch.exe on the machine),
-which POSTs a report every second:
+Each PC runs the agent (agent/hostwatch-agent.cs, built into hostwatch-agent.exe),
+installed by hostwatch-setup.exe, which POSTs a report every second:
 identity (hostname, user, MAC, IP), CPU, memory, disks, uptime and how long
 the keyboard/mouse have been idle. This server keeps the latest report per PC,
 flags problems and serves a dashboard at /.
@@ -29,6 +29,8 @@ except ImportError:
     ZoneInfo = None
 
 import asyncio
+import io
+import zipfile
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -42,7 +44,7 @@ DEMO = os.environ.get("HOSTWATCH_DEMO", "") == "1"   # fake office for screensho
 HERE = Path(__file__).parent
 STATIC_DIR = HERE / "static"
 AGENT_DIR = HERE / "agent" if (HERE / "agent").exists() else HERE.parent / "agent"
-AGENT_FILES = ("hostwatch.exe",)
+AGENT_FILES = ("hostwatch-agent.exe", "hostwatch-setup.exe")
 HISTORY_SECONDS = 900      # CPU/network samples kept (~15 min at one report per second)
 SPARK_POINTS = 120         # samples shown on the cards (~2 min)
 CPU_HOT_SECONDS = 120      # CPU ≥90% for this long is a problem
@@ -613,18 +615,27 @@ async def set_work(request: Request) -> dict:
     return {"ok": True, "work": work_config()}
 
 
+@app.get("/agent/hostwatch.zip")
+def agent_download_zip():
+    """The dashboard download: both exes in one zip, so the setup finds the agent next to itself."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name in AGENT_FILES:
+            path = AGENT_DIR / name
+            if path.exists():
+                archive.write(path, name)
+    return Response(buffer.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": 'attachment; filename="hostwatch.zip"'})
+
+
 @app.get("/agent/{name}")
-def agent_download(name: str, request: Request):
-    """Serves the agent files; install.cmd gets this server's address baked in."""
+def agent_download(name: str):
+    """Serves an individual agent file (the two exes)."""
     if name not in AGENT_FILES:
         return PlainTextResponse("not found", status_code=404)
     path = AGENT_DIR / name
-    if name == "install.cmd":
-        server = f"{request.url.scheme}://{request.url.netloc}"
-        text = path.read_text(encoding="utf-8").replace("__SERVER_URL__", server)
-        text = text.replace("\r\n", "\n").replace("\n", "\r\n")   # cmd.exe wants CRLF
-        return PlainTextResponse(text, media_type="application/octet-stream",
-                                 headers={"Content-Disposition": f'attachment; filename="{name}"'})
+    if not path.exists():
+        return PlainTextResponse("not built yet", status_code=404)
     return FileResponse(path, filename=name)
 
 

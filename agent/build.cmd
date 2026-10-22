@@ -1,6 +1,7 @@
 @echo off
-rem Builds hostwatch.exe from hostwatch-agent.cs with the C# compiler bundled in Windows.
-rem Run on any Windows 10/11 machine (no SDK needed), then commit the new agent\hostwatch.exe.
+rem Builds hostwatch-agent.exe (resident monitor) and hostwatch-setup.exe (installer) from the C#
+rem sources with the compiler bundled in Windows. Run on any Windows 10/11 machine (no SDK needed),
+rem then commit the two new exe files. hostwatch-common.cs is compiled into both.
 setlocal
 cd /d "%~dp0"
 
@@ -12,13 +13,21 @@ if not exist "%CSC%" (
   exit /b 1
 )
 
-"%CSC%" /nologo /target:winexe /optimize+ /out:hostwatch.exe ^
-  /r:System.Management.dll /r:Microsoft.VisualBasic.dll hostwatch-agent.cs
+"%CSC%" /nologo /target:winexe /optimize+ /out:hostwatch-agent.exe ^
+  /r:System.Management.dll /r:Microsoft.VisualBasic.dll hostwatch-common.cs hostwatch-agent.cs
 if errorlevel 1 (
-  echo Build failed.
+  echo Agent build failed.
   pause
   exit /b 1
 )
 
-echo Built hostwatch.exe
+"%CSC%" /nologo /target:winexe /optimize+ /out:hostwatch-setup.exe ^
+  /r:Microsoft.VisualBasic.dll hostwatch-common.cs hostwatch-setup.cs
+if errorlevel 1 (
+  echo Setup build failed.
+  pause
+  exit /b 1
+)
+
+echo Built hostwatch-agent.exe and hostwatch-setup.exe
 pause
