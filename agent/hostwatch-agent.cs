@@ -135,8 +135,12 @@ namespace Hostwatch
             catch { return false; }
         }
 
-        [DllImport("kernel32.dll")]
+        [DllImport("kernel32.dll", SetLastError = true)]
         public static extern bool AllocConsole();
+
+        public delegate bool ConsoleCtrlHandler(int controlType);
+        [DllImport("kernel32.dll")]
+        public static extern bool SetConsoleCtrlHandler(ConsoleCtrlHandler handler, bool add);
 
         [DllImport("psapi.dll")]
         static extern bool EmptyWorkingSet(IntPtr process);
@@ -217,9 +221,13 @@ namespace Hostwatch
         static readonly Queue<string> queuedLines = new Queue<string>();
         static readonly object queueGate = new object();
         static volatile int viewerCount = 0;
+        static volatile bool echoToConsole = false;
         static Func<string> describeAgent;
 
-        public static bool Watching { get { return viewerCount > 0; } }
+        public static bool Watching { get { return echoToConsole || viewerCount > 0; } }
+
+        // Debug install: this process owns a console, so print straight to it instead of the pipe.
+        public static void EchoToConsole() { echoToConsole = true; }
 
         public static void StartServer(Func<string> agentDescription)
         {
@@ -239,9 +247,11 @@ namespace Hostwatch
         public static void Log(string message)
         {
             if (!Watching) return;
+            string line = DateTime.Now.ToString("HH:mm:ss.fff") + "  " + message;
+            if (echoToConsole) { try { Console.WriteLine(line); } catch { } return; }
             lock (queueGate)
             {
-                queuedLines.Enqueue(DateTime.Now.ToString("HH:mm:ss.fff") + "  " + message);
+                queuedLines.Enqueue(line);
                 while (queuedLines.Count > MaxQueuedLines) queuedLines.Dequeue();
                 Monitor.Pulse(queueGate);
             }
@@ -389,8 +399,7 @@ namespace Hostwatch
         [STAThread]
         static void Main(string[] args)
         {
-            // Only a viewer for the already running agent: no install, no elevation, no tray.
-            if (Array.IndexOf(args, "-debug") >= 0) { RunDebugViewer(); return; }
+            bool debug = Array.IndexOf(args, "-debug") >= 0;
 
             // Per-user install keeps everything in LOCALAPPDATA; an all-users install keeps the exe,
             // config and offline buffer in ProgramData so they are shared, not tied to one account.
@@ -405,15 +414,25 @@ namespace Hostwatch
             exePath = self;
             bool runningMachine = string.Equals(self, machineTarget, StringComparison.OrdinalIgnoreCase);
             bool installed = runningMachine || string.Equals(self, localTarget, StringComparison.OrdinalIgnoreCase);
+
+            // Installed copy with -debug: only a viewer for the already running agent, no tray.
+            if (debug && installed) { RunDebugViewer(); return; }
+
             // The downloaded copy only ever installs for all users (ProgramData/HKLM), which needs
             // admin: elevate first, and install nothing if the UAC prompt is declined.
             if (!installed && !IsElevated()) { RelaunchElevated(args); return; }
 
+            // Downloaded copy with -debug (already elevated): install with every step printed to a console.
+            if (debug && OpenDebugConsole()) DebugLog.EchoToConsole();
+            DebugLog.Log("installer " + Version + ": " + self + ", elevated, installing to " + machineTarget);
+
             machineInstall = installed ? runningMachine : true;
             string dataDir = machineInstall ? machineDir : localDir;
-            try { Directory.CreateDirectory(dataDir); } catch { }
+            try { Directory.CreateDirectory(dataDir); }
+            catch (Exception exception) { DebugLog.Log("creating " + dataDir + " failed: " + exception); }
             pendingPath = System.IO.Path.Combine(dataDir, "pending.txt");
             config = new Config(System.IO.Path.Combine(dataDir, "config.json"));
+            DebugLog.Log("saved config " + config.Path + ": server \"" + config.Server + "\", label \"" + config.Label + "\"");
 
             // The saved server is the source of truth: -Server only seeds it when nothing usable is
             // saved yet, so changing the server from the tray survives reboots. A loopback address is
@@ -429,10 +448,16 @@ namespace Hostwatch
             {
                 string answer = Microsoft.VisualBasic.Interaction.InputBox(
                     "hostwatch server address, e.g. http://192.168.31.6:8765", "hostwatch", "http://");
-                if (string.IsNullOrEmpty(answer) || answer == "http://") return;
+                if (string.IsNullOrEmpty(answer) || answer == "http://")
+                {
+                    DebugLog.Log("no server entered, nothing installed. Press Enter to close.");
+                    if (DebugLog.Watching) Console.ReadLine();
+                    return;
+                }
                 config.Server = answer.TrimEnd('/');
                 config.Save();
             }
+            DebugLog.Log("server: " + config.Server);
 
             // Already in place? Refresh the autostart and run. Otherwise this is the downloaded
             // installer: replace any prior install with this fresh all-users copy, then hand off.
@@ -445,14 +470,35 @@ namespace Hostwatch
                 // alongside the new one. SetAutostart writes the HKLM entry for the new copy.
                 foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcessesByName("hostwatch"))
                     if (p.Id != System.Diagnostics.Process.GetCurrentProcess().Id)
-                        try { p.Kill(); p.WaitForExit(3000); } catch { }
+                    {
+                        try
+                        {
+                            DebugLog.Log("stopping old agent pid " + p.Id + " (session " + p.SessionId + ")");
+                            p.Kill();
+                            DebugLog.Log(p.WaitForExit(3000) ? "pid " + p.Id + " stopped" : "pid " + p.Id + " still running after 3s");
+                        }
+                        catch (Exception exception) { DebugLog.Log("stopping pid " + p.Id + " failed: " + exception.Message); }
+                    }
                 SetAutostart(true, machineTarget, config.Server);
-                try { File.Copy(self, machineTarget, true); } catch { }
-                try { System.Diagnostics.Process.Start(machineTarget, "-Server \"" + config.Server + "\""); } catch { }
+                try { File.Copy(self, machineTarget, true); DebugLog.Log("copied to " + machineTarget); }
+                catch (Exception exception) { DebugLog.Log("copy to " + machineTarget + " failed: " + exception); }
+                try
+                {
+                    System.Diagnostics.Process agent = System.Diagnostics.Process.Start(machineTarget, "-Server \"" + config.Server + "\"");
+                    DebugLog.Log("started " + machineTarget + (agent != null ? " pid " + agent.Id : ""));
+                }
+                catch (Exception exception) { DebugLog.Log("starting " + machineTarget + " failed: " + exception); }
 
                 // The download is only an installer, and any old per-user copy is now orphaned.
                 // Remove both once this process exits (a running exe can't delete its own file).
-                CleanupAfterExit(self, localDir);
+                if (!DebugLog.Watching) { CleanupAfterExit(self, localDir); return; }
+
+                // Debug: keep this console on the new agent's live log, and only schedule the cleanup
+                // when the window is closed or Ctrl+C is pressed, since the cleanup deletes this exe.
+                cleanupOnConsoleClose = delegate { CleanupAfterExit(self, localDir); return false; };
+                Native.SetConsoleCtrlHandler(cleanupOnConsoleClose, true);
+                DebugLog.Log("install finished, watching the new agent (closing this window removes the installer file)");
+                WatchAgentLog();
                 return;
             }
 
@@ -491,14 +537,36 @@ namespace Hostwatch
                    ", pending segments " + pending.Count + ", status: " + currentStatus;
         }
 
-        // "hostwatch.exe -debug": prints the running agent's live log in its own console window.
-        // Closing the window or Ctrl+C ends only this viewer.
+        static Native.ConsoleCtrlHandler cleanupOnConsoleClose;   // kept in a field so the GC can't collect the callback
+
+        // "hostwatch.exe -debug" on the installed copy: prints the running agent's live log in its own
+        // console window. Closing the window or Ctrl+C ends only this viewer.
         static void RunDebugViewer()
         {
-            Native.AllocConsole();
+            if (!OpenDebugConsole()) return;
+            try { WatchAgentLog(); }
+            catch (Exception exception)
+            {
+                MessageBox.Show("Debug viewer crashed:\n\n" + exception, "hostwatch", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        static bool OpenDebugConsole()
+        {
+            if (!Native.AllocConsole())
+            {
+                MessageBox.Show("Could not open a console window (AllocConsole error " + Marshal.GetLastWin32Error() + ").",
+                    "hostwatch", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
             try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
             try { Console.Title = "hostwatch debug"; } catch { }
-            Console.WriteLine("hostwatch " + Version + " debug viewer. Close this window or press Ctrl+C to stop watching; the agent keeps running.");
+            Console.WriteLine("hostwatch " + Version + " debug. Close this window or press Ctrl+C to stop watching; the agent keeps running.");
+            return true;
+        }
+
+        static void WatchAgentLog()
+        {
             bool waitingShown = false;
             while (true)
             {
@@ -1135,15 +1203,17 @@ namespace Hostwatch
                     if (k != null) k.SetValue("Shadow", 2, RegistryValueKind.DWord);
                 using (RegistryKey k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"))
                     if (k != null) k.SetValue("LocalAccountTokenFilterPolicy", 1, RegistryValueKind.DWord);
+                DebugLog.Log("RDP shadow enabled in the registry");
             }
-            catch { }
+            catch (Exception exception) { DebugLog.Log("RDP shadow registry setup failed: " + exception); }
             try
             {
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
                     "netsh", "advfirewall firewall set rule group=\"Remote Desktop\" new enable=Yes")
                 { WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden, CreateNoWindow = true, UseShellExecute = false });
+                DebugLog.Log("netsh: enabling the Remote Desktop firewall rules");
             }
-            catch { }
+            catch (Exception exception) { DebugLog.Log("netsh failed: " + exception.Message); }
         }
 
         static void GrantUsersWrite(string dir)
@@ -1158,8 +1228,9 @@ namespace Hostwatch
                     InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
                     PropagationFlags.None, AccessControlType.Allow));
                 info.SetAccessControl(security);
+                DebugLog.Log("granted Users write access to " + dir);
             }
-            catch { }
+            catch (Exception exception) { DebugLog.Log("granting Users write access to " + dir + " failed: " + exception); }
         }
 
         static void SetAutostart(bool allUsers, string target, string server)
@@ -1168,9 +1239,13 @@ namespace Hostwatch
             {
                 RegistryKey root = allUsers ? Registry.LocalMachine : Registry.CurrentUser;
                 using (RegistryKey run = root.OpenSubKey(RunKey, true))
+                {
                     if (run != null) run.SetValue("Hostwatch", "\"" + target + "\" -Server \"" + server + "\"");
+                    DebugLog.Log(run != null ? "autostart (" + (allUsers ? "HKLM" : "HKCU") + "): " + target + " -Server " + server
+                                             : "autostart: Run key not found");
+                }
             }
-            catch { }
+            catch (Exception exception) { DebugLog.Log("setting autostart failed: " + exception); }
             if (allUsers)   // drop a per-user leftover so it doesn't start twice
                 try { using (RegistryKey run = Registry.CurrentUser.OpenSubKey(RunKey, true)) if (run != null) run.DeleteValue("Hostwatch", false); } catch { }
         }
@@ -1206,8 +1281,9 @@ namespace Hostwatch
                 if (!string.IsNullOrEmpty(installerFile)) cmd += " & del /f /q \"" + installerFile + "\"";
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", cmd)
                 { WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden, CreateNoWindow = true });
+                DebugLog.Log("cleanup scheduled: cmd.exe " + cmd);
             }
-            catch { }
+            catch (Exception exception) { DebugLog.Log("scheduling cleanup failed: " + exception.Message); }
         }
 
         static bool IsLoopback(string url)
