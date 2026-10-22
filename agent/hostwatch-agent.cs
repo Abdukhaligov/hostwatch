@@ -11,6 +11,7 @@ using System.Globalization;
 using System.IO;
 using System.Management;
 using System.Net;
+using System.IO.Pipes;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -134,6 +135,9 @@ namespace Hostwatch
             catch { return false; }
         }
 
+        [DllImport("kernel32.dll")]
+        public static extern bool AllocConsole();
+
         [DllImport("psapi.dll")]
         static extern bool EmptyWorkingSet(IntPtr process);
 
@@ -201,6 +205,105 @@ namespace Hostwatch
         }
     }
 
+    // Live debug stream for "hostwatch.exe -debug". The running agent serves it over a named pipe,
+    // one per logon session; the viewer is a separate process with its own console, so closing that
+    // window never touches the agent. While no viewer is connected, Log drops everything.
+    static class DebugLog
+    {
+        public static readonly string PipeName = "HostwatchDebug-" + System.Diagnostics.Process.GetCurrentProcess().SessionId;
+        const int MaxQueuedLines = 5000;
+
+        static readonly List<StreamWriter> viewers = new List<StreamWriter>();
+        static readonly Queue<string> queuedLines = new Queue<string>();
+        static readonly object queueGate = new object();
+        static volatile int viewerCount = 0;
+        static Func<string> describeAgent;
+
+        public static bool Watching { get { return viewerCount > 0; } }
+
+        public static void StartServer(Func<string> agentDescription)
+        {
+            describeAgent = agentDescription;
+            StartBackground(AcceptViewers);
+            StartBackground(SendQueuedLines);
+        }
+
+        static void StartBackground(ThreadStart work)
+        {
+            Thread thread = new Thread(work);
+            thread.IsBackground = true;
+            thread.Start();
+        }
+
+        // Only queues: a viewer that stops reading (e.g. text selected in its console) must not stall the worker.
+        public static void Log(string message)
+        {
+            if (!Watching) return;
+            lock (queueGate)
+            {
+                queuedLines.Enqueue(DateTime.Now.ToString("HH:mm:ss.fff") + "  " + message);
+                while (queuedLines.Count > MaxQueuedLines) queuedLines.Dequeue();
+                Monitor.Pulse(queueGate);
+            }
+        }
+
+        static void AcceptViewers()
+        {
+            while (true)
+            {
+                try
+                {
+                    NamedPipeServerStream pipe = new NamedPipeServerStream(PipeName, PipeDirection.Out,
+                        NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte,
+                        PipeOptions.None, 0, 0, OwnerOnlySecurity());
+                    pipe.WaitForConnection();
+                    StreamWriter writer = new StreamWriter(pipe, new UTF8Encoding(false));
+                    writer.AutoFlush = true;
+                    lock (viewers) { viewers.Add(writer); viewerCount = viewers.Count; }
+                    Log("viewer connected: " + describeAgent());
+                }
+                catch { Thread.Sleep(1000); }
+            }
+        }
+
+        static void SendQueuedLines()
+        {
+            while (true)
+            {
+                string line;
+                lock (queueGate)
+                {
+                    while (queuedLines.Count == 0) Monitor.Wait(queueGate);
+                    line = queuedLines.Dequeue();
+                }
+                lock (viewers)
+                {
+                    for (int viewerIndex = viewers.Count - 1; viewerIndex >= 0; viewerIndex--)
+                    {
+                        try { viewers[viewerIndex].WriteLine(line); }
+                        catch
+                        {
+                            try { viewers[viewerIndex].Dispose(); } catch { }
+                            viewers.RemoveAt(viewerIndex);
+                        }
+                    }
+                    viewerCount = viewers.Count;
+                }
+            }
+        }
+
+        // Reports carry user/IP details, so only the agent's own account may read them, and never over the network.
+        static PipeSecurity OwnerOnlySecurity()
+        {
+            PipeSecurity security = new PipeSecurity();
+            using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
+                security.AddAccessRule(new PipeAccessRule(identity.User, PipeAccessRights.FullControl, AccessControlType.Allow));
+            security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.NetworkSid, null),
+                PipeAccessRights.FullControl, AccessControlType.Deny));
+            return security;
+        }
+    }
+
     class Config
     {
         public string Server = "";
@@ -235,8 +338,9 @@ namespace Hostwatch
                               ",\n  \"label_set_at\": " + Json.Num(LabelSetAt) +
                               ",\n  \"token\": " + Json.Str(Token) + "\n}\n";
                 File.WriteAllText(Path, json, new UTF8Encoding(false));
+                DebugLog.Log("config saved: server " + Server + ", label \"" + Label + "\", token " + (Token == "" ? "none" : "set"));
             }
-            catch { }
+            catch (Exception exception) { DebugLog.Log("config save failed: " + exception); }
         }
     }
 
@@ -250,7 +354,7 @@ namespace Hostwatch
 
     class Program
     {
-        const string Version = "2.14";
+        const string Version = "2.15";
         const int IntervalMs = 1000;
         const int StaticEverySec = 60;
         // Fixed path for fetching this server's report token (same constant lives in server/app.py).
@@ -285,6 +389,9 @@ namespace Hostwatch
         [STAThread]
         static void Main(string[] args)
         {
+            // Only a viewer for the already running agent: no install, no elevation, no tray.
+            if (Array.IndexOf(args, "-debug") >= 0) { RunDebugViewer(); return; }
+
             // Per-user install keeps everything in LOCALAPPDATA; an all-users install keeps the exe,
             // config and offline buffer in ProgramData so they are shared, not tied to one account.
             string localDir = System.IO.Path.Combine(
@@ -357,6 +464,8 @@ namespace Hostwatch
             Mutex mutex = new Mutex(true, "Local\\HostwatchAgent", out created);
             if (!created) return;
 
+            DebugLog.StartServer(DescribeAgent);
+
             ServicePointManager.Expect100Continue = false;
             try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072; } catch { }
 
@@ -373,6 +482,53 @@ namespace Hostwatch
             GC.KeepAlive(mutex);
         }
 
+        static string DescribeAgent()
+        {
+            string currentStatus; lock (gate) { currentStatus = status; }
+            return "hostwatch " + Version + ", exe " + exePath + ", " + (machineInstall ? "all users" : "per user") +
+                   ", config " + config.Path + ", server " + config.Server + ", label \"" + config.Label + "\"" +
+                   ", token " + (string.IsNullOrEmpty(config.Token) ? "none" : "set") + ", idle after " + idleAfter + "s" +
+                   ", pending segments " + pending.Count + ", status: " + currentStatus;
+        }
+
+        // "hostwatch.exe -debug": prints the running agent's live log in its own console window.
+        // Closing the window or Ctrl+C ends only this viewer.
+        static void RunDebugViewer()
+        {
+            Native.AllocConsole();
+            try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
+            try { Console.Title = "hostwatch debug"; } catch { }
+            Console.WriteLine("hostwatch " + Version + " debug viewer. Close this window or press Ctrl+C to stop watching; the agent keeps running.");
+            bool waitingShown = false;
+            while (true)
+            {
+                try
+                {
+                    using (NamedPipeClientStream pipe = new NamedPipeClientStream(".", DebugLog.PipeName, PipeDirection.In))
+                    {
+                        pipe.Connect(2000);
+                        waitingShown = false;
+                        using (StreamReader reader = new StreamReader(pipe, Encoding.UTF8))
+                        {
+                            string line;
+                            while ((line = reader.ReadLine()) != null) Console.WriteLine(line);
+                        }
+                    }
+                    Console.WriteLine("-- agent disconnected");
+                }
+                catch (TimeoutException)
+                {
+                    if (!waitingShown) Console.WriteLine("-- waiting for the agent in this session (" + DebugLog.PipeName + ")...");
+                    waitingShown = true;
+                }
+                catch (Exception exception)
+                {
+                    Console.WriteLine("-- " + exception.Message);
+                    Thread.Sleep(2000);
+                }
+            }
+        }
+
         // ---------- background worker: collect + send, never touches the UI ----------
         static void WorkerLoop()
         {
@@ -386,7 +542,9 @@ namespace Hostwatch
             {
                 DateTime tickAt = DateTime.UtcNow;
                 double nowUnix = NowUnix();
-                string actState = Native.IdleSeconds() >= (uint)idleAfter ? "idle" : "active";
+                uint inputIdleSeconds = Native.IdleSeconds();
+                string actState = inputIdleSeconds >= (uint)idleAfter ? "idle" : "active";
+                DebugLog.Log("tick: " + actState + " (no input for " + inputIdleSeconds + "s, idle after " + idleAfter + "s)");
                 if (actState == "idle") System.Threading.Interlocked.Increment(ref idleSec);
                 else System.Threading.Interlocked.Increment(ref activeSec);
                 requestToday = !seededToday;
@@ -403,7 +561,10 @@ namespace Hostwatch
 
                     // Token rejected (rotated, or the server's config was reset): drop it and re-enroll.
                     if (!Json.GetBool(reply, "ok") && (Json.GetStr(reply, "error") ?? "").Contains("unauthorized"))
+                    {
+                        DebugLog.Log("token rejected, dropping it to re-enroll");
                         lock (gate) { config.Token = ""; config.Save(); }
+                    }
 
                     // A label changed on the dashboard comes back here.
                     double replyAt = Json.GetNum(reply, "label_set_at", 0);
@@ -415,8 +576,11 @@ namespace Hostwatch
                             config.LabelSetAt = replyAt;
                             config.Save();
                         }
+                        DebugLog.Log("label changed on the dashboard: \"" + config.Label + "\"");
                     }
-                    idleAfter = (int)Json.GetNum(reply, "idle_after", idleAfter);
+                    int replyIdleAfter = (int)Json.GetNum(reply, "idle_after", idleAfter);
+                    if (replyIdleAfter != idleAfter) DebugLog.Log("idle threshold from server: " + idleAfter + "s -> " + replyIdleAfter + "s");
+                    idleAfter = replyIdleAfter;
 
                     // Continue today's active/idle from the server instead of counting from zero.
                     if (requestToday)
@@ -426,6 +590,7 @@ namespace Hostwatch
                         {
                             System.Threading.Interlocked.Exchange(ref activeSec, (long)ta);
                             System.Threading.Interlocked.Exchange(ref idleSec, (long)ti);
+                            DebugLog.Log("today's totals from server: active " + FmtDur((long)ta) + ", idle " + FmtDur((long)ti));
                         }
                         seededToday = true;
                     }
@@ -435,12 +600,17 @@ namespace Hostwatch
                     if (pushed.Length > 0 && !IsLoopback(pushed) &&
                         !string.Equals(pushed, config.Server, StringComparison.OrdinalIgnoreCase))
                     {
+                        DebugLog.Log("server pushed a new address: " + config.Server + " -> " + pushed);
                         lock (gate) { config.Server = pushed; config.Save(); }
                         SetAutostart(machineInstall, exePath, config.Server);
                         SetStatus(true, "server -> " + pushed);
                     }
 
-                    if (Json.GetStr(reply, "command") == "clear_cache") Native.ClearMemory();
+                    if (Json.GetStr(reply, "command") == "clear_cache")
+                    {
+                        DebugLog.Log("command clear_cache: trimming working sets");
+                        Native.ClearMemory();
+                    }
                     bool good = Json.GetBool(reply, "ok");
                     SetStatus(good, good ? "sent " + DateTime.Now.ToString("HH:mm:ss")
                                          : "rejected: " + (Json.GetStr(reply, "error") ?? "?"));
@@ -448,20 +618,28 @@ namespace Hostwatch
                 catch (Exception ex)
                 {
                     SetStatus(false, "error: " + ex.Message);
+                    DebugLog.Log("report failed: " + ex);
                 }
 
                 // Offline: keep a local active/idle log and flush it once the server is back.
                 if (online)
                 {
-                    if (pending.Count > 0 && SendBackfill())
+                    if (pending.Count > 0)
                     {
-                        pending.Clear();
-                        try { if (File.Exists(pendingPath)) File.Delete(pendingPath); } catch { }
+                        DebugLog.Log("back online, sending " + pending.Count + " buffered segments");
+                        if (SendBackfill())
+                        {
+                            pending.Clear();
+                            try { if (File.Exists(pendingPath)) File.Delete(pendingPath); } catch { }
+                            DebugLog.Log("backfill accepted, buffer cleared");
+                        }
+                        else DebugLog.Log("backfill not accepted, will retry next tick");
                     }
                 }
                 else
                 {
                     AppendActivity(nowUnix, actState);
+                    DebugLog.Log("offline: buffered " + actState + ", " + pending.Count + " segments pending");
                     if (nowUnix - lastPendingSave >= 10) { SavePending(); lastPendingSave = nowUnix; }
                 }
 
@@ -495,8 +673,9 @@ namespace Hostwatch
                 foreach (Seg s in pending)
                     sb.Append(s.From.ToString(Inv)).Append(',').Append(s.To.ToString(Inv)).Append(',').Append(s.State).Append('\n');
                 File.WriteAllText(pendingPath, sb.ToString());
+                DebugLog.Log("saved " + pending.Count + " pending segments to " + pendingPath);
             }
-            catch { }
+            catch (Exception exception) { DebugLog.Log("saving pending segments failed: " + exception); }
         }
 
         static void LoadPending()
@@ -532,14 +711,20 @@ namespace Hostwatch
                 sb.Append("]}");
                 return Json.GetBool(Post(config.Server + "/api/report/backfill", sb.ToString()), "ok");
             }
-            catch { return false; }
+            catch (Exception exception)
+            {
+                DebugLog.Log("backfill failed: " + exception);
+                return false;
+            }
         }
 
         static void CollectStatic()
         {
-            try { CollectWmi(); } catch { }
-            try { CollectNetworks(); } catch { }
+            try { CollectWmi(); } catch (Exception exception) { DebugLog.Log("WMI collection failed: " + exception); }
+            try { CollectNetworks(); } catch (Exception exception) { DebugLog.Log("network collection failed: " + exception); }
             statAt = DateTime.UtcNow;
+            DebugLog.Log("static info: " + stat.Os + " | " + stat.Model + " | " + stat.CpuName + " (" + stat.Cores + "c/" +
+                         stat.Threads + "t) | ip " + stat.Ip + " | mac " + stat.Mac + " | disks " + stat.DisksJson);
         }
 
         static void CollectWmi()
@@ -696,12 +881,15 @@ namespace Hostwatch
             byte[] bytes = Encoding.UTF8.GetBytes(json);
             req.ContentLength = bytes.Length;
             ownTxBytes += bytes.Length + HttpOverhead;
+            DebugLog.Log("POST " + url + " " + json);
+            System.Diagnostics.Stopwatch elapsed = System.Diagnostics.Stopwatch.StartNew();
             using (Stream s = req.GetRequestStream()) s.Write(bytes, 0, bytes.Length);
             using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
             using (StreamReader sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
             {
                 string reply = sr.ReadToEnd();
                 ownRxBytes += Encoding.UTF8.GetByteCount(reply) + HttpOverhead;
+                DebugLog.Log("<- " + (int)resp.StatusCode + " in " + elapsed.ElapsedMilliseconds + " ms " + reply);
                 return reply;
             }
         }
@@ -711,6 +899,7 @@ namespace Hostwatch
         static void EnsureToken()
         {
             if (!string.IsNullOrEmpty(config.Token)) return;
+            DebugLog.Log("no token yet, enrolling with " + config.Server);
             try
             {
                 HttpWebRequest req = (HttpWebRequest)WebRequest.Create(config.Server + "/api/enroll/" + EnrollKey);
@@ -722,9 +911,13 @@ namespace Hostwatch
                 {
                     string tok = Json.GetStr(sr.ReadToEnd(), "token");
                     if (!string.IsNullOrEmpty(tok)) lock (gate) { config.Token = tok; config.Save(); }
+                    DebugLog.Log(string.IsNullOrEmpty(tok) ? "enroll: server returned no token" : "enroll: token received");
                 }
             }
-            catch { }   // server down or unreachable: try again next tick
+            catch (Exception exception)   // server down or unreachable: try again next tick
+            {
+                DebugLog.Log("enroll failed: " + exception.Message);
+            }
         }
 
         // ---------- tray (UI thread) ----------
@@ -779,9 +972,10 @@ namespace Hostwatch
                 menu.Items.Add("Set label...").Click += OnLabel;
                 menu.Items.Add("Open dashboard").Click += delegate { try { System.Diagnostics.Process.Start(config.Server); } catch { } };
                 menu.Items.Add("Change server...").Click += OnServer;
+                menu.Items.Add("Debug console").Click += delegate { try { System.Diagnostics.Process.Start(exePath, "-debug"); } catch { } };
                 menu.Items.Add(new ToolStripSeparator());
                 menu.Items.Add("Uninstall").Click += OnUninstall;
-                menu.Items.Add("Exit").Click += delegate { tray.Visible = false; Application.Exit(); };
+                menu.Items.Add("Exit").Click += delegate { DebugLog.Log("Exit from tray"); tray.Visible = false; Application.Exit(); };
             }
             menu.Opening += delegate { miStatus.Text = StatusLine(); miTimes.Text = TimesLine(); };
             tray.ContextMenuStrip = menu;
@@ -850,6 +1044,7 @@ namespace Hostwatch
         {
             if (MessageBox.Show("Remove hostwatch from this PC?", "hostwatch",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            DebugLog.Log("Uninstall from tray");
             tray.Visible = false;
             Uninstall();
             Application.Exit();
