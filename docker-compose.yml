@@ -9,6 +9,11 @@ services:
       - "${HOSTWATCH_BIND:-0.0.0.0}:${HOSTWATCH_PORT:-8765}:8765"
     volumes:
       - ./data:/data
+      # TLS: put hostwatch.crt + hostwatch.key here (see tools/make-cert.sh) and uncomment the env below.
+      - ./certs:/certs:ro
     environment:
       HOSTWATCH_DATA: /data/agents.json
       HOSTWATCH_CONFIG: /data/config.json
+      # Uncomment to serve over https (agent reports encrypted; the setup trusts this cert on clients):
+      # HOSTWATCH_TLS_CERT: /certs/hostwatch.crt
+      # HOSTWATCH_TLS_KEY: /certs/hostwatch.key

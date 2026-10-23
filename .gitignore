@@ -4,3 +4,11 @@ __pycache__/
 .venv/
 config.json
 .DS_Store
+# Built agent binaries - each site builds them with its own server address baked in (see build.cmd),
+# so they are not committed; put the freshly built ones into the server's agent/ folder to be served.
+agent/*.exe
+agent/hostwatch-build.cs
+# TLS material - never commit the key; keep the cert with the server.
+certs/
+tools/hostwatch.key
+tools/hostwatch.crt

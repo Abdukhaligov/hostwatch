@@ -1,7 +1,8 @@
 // hostwatch setup - installs, reconfigures and removes the hostwatch agent for all users of this PC.
 // All the one-time, privileged work lives here, not in the resident agent: elevate, grant the data
-// folder write access, enable RDP shadowing, stop any old agent, copy the two exes into ProgramData,
-// write the HKLM autostart and launch the agent. Run it from the folder that holds hostwatch-agent.exe.
+// folder write access, trust the server's TLS certificate, enable RDP shadowing (with consent), stop
+// any old agent, copy the two exes into ProgramData, write the HKLM autostart and launch the agent.
+// Run it from the folder that holds hostwatch-agent.exe (and hostwatch.crt, when the server uses https).
 //   hostwatch-setup.exe                      install (asks for the server if not stored yet)
 //   hostwatch-setup.exe -Server http://IP    install/reconfigure with that server, no prompt
 //   hostwatch-setup.exe -uninstall           remove the agent from this PC
@@ -14,6 +15,7 @@ using System.Windows.Forms;
 using Microsoft.Win32;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Security.Cryptography.X509Certificates;
 
 namespace Hostwatch
 {
@@ -38,6 +40,7 @@ namespace Hostwatch
             {
                 DebugLog.Log("uninstalling");
                 RemoveAutostartAndStopAgents();
+                RemoveServerCert();
                 if (debug) { DebugLog.Log("done. Press Enter to remove the files and close."); Console.ReadLine(); }
                 ScheduleFolderDelete();
                 return;
@@ -67,6 +70,9 @@ namespace Hostwatch
             Config config = new Config(Paths.ConfigPath);
             string serverArg = ServerArg(args);
             if (!string.IsNullOrEmpty(serverArg)) config.Server = serverArg.TrimEnd('/');
+            // Fall back to the address baked in at build time (see build.cmd) before asking.
+            if (string.IsNullOrEmpty(config.Server) && !string.IsNullOrEmpty(BuildConfig.DefaultServer))
+                config.Server = BuildConfig.DefaultServer.TrimEnd('/');
             if (string.IsNullOrEmpty(config.Server))
             {
                 string answer = Microsoft.VisualBasic.Interaction.InputBox(
@@ -83,7 +89,8 @@ namespace Hostwatch
             DebugLog.Log("server: " + config.Server);
 
             GrantUsersWrite(Paths.DataDir);   // standard users can save config/label and the offline buffer
-            ConfigureShadow();                // enable RDP shadow so an admin can connect from the dashboard
+            InstallServerCert(selfDir);       // trust the server's cert so the agent can use https
+            ConfigureShadow();                // enable RDP shadow (with consent) so an admin can connect
 
             RemoveAutostartAndStopAgents();   // replace whatever is already installed
 
@@ -151,9 +158,11 @@ namespace Hostwatch
             }
         }
 
-        // Set up RDP shadowing on this PC so an admin can just download SHADOW and connect:
-        // enable Remote Desktop, allow control without a consent prompt, relax the workgroup token
-        // filter, and open the firewall.
+        // Set up RDP shadowing on this PC so an admin can download SHADOW from the dashboard and
+        // connect: enable Remote Desktop and open the firewall. Shadow = 1 means the person at the PC
+        // gets a consent prompt and must accept before the admin sees or controls their session.
+        // We deliberately do NOT set LocalAccountTokenFilterPolicy (that would weaken UAC filtering for
+        // every remote logon) and do NOT use Shadow = 2 (silent control) - the 2GIS SOC flagged both.
         static void ConfigureShadow()
         {
             try
@@ -161,10 +170,8 @@ namespace Hostwatch
                 using (RegistryKey k = Registry.LocalMachine.CreateSubKey(@"SYSTEM\CurrentControlSet\Control\Terminal Server"))
                     if (k != null) k.SetValue("fDenyTSConnections", 0, RegistryValueKind.DWord);
                 using (RegistryKey k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"))
-                    if (k != null) k.SetValue("Shadow", 2, RegistryValueKind.DWord);
-                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"))
-                    if (k != null) k.SetValue("LocalAccountTokenFilterPolicy", 1, RegistryValueKind.DWord);
-                DebugLog.Log("RDP shadow enabled in the registry");
+                    if (k != null) k.SetValue("Shadow", 1, RegistryValueKind.DWord);   // full control, WITH consent
+                DebugLog.Log("RDP shadow enabled with consent (Shadow=1)");
             }
             catch (Exception exception) { DebugLog.Log("RDP shadow registry setup failed: " + exception); }
             try
@@ -175,6 +182,48 @@ namespace Hostwatch
                 DebugLog.Log("netsh: enabling the Remote Desktop firewall rules");
             }
             catch (Exception exception) { DebugLog.Log("netsh failed: " + exception.Message); }
+        }
+
+        // Trust the server's self-signed TLS certificate so the agent can POST over https with normal
+        // validation. The public cert ships next to the setup as hostwatch.crt (in the download zip);
+        // we import it into the machine-wide Trusted Root store and keep a copy so uninstall can remove it.
+        static void InstallServerCert(string selfDir)
+        {
+            string certSource = System.IO.Path.Combine(selfDir, "hostwatch.crt");
+            if (!File.Exists(certSource))
+            {
+                DebugLog.Log("no hostwatch.crt next to the setup - skipping TLS trust (server may be http)");
+                return;
+            }
+            try
+            {
+                X509Certificate2 certificate = new X509Certificate2(certSource);
+                using (X509Store store = new X509Store(StoreName.Root, StoreLocation.LocalMachine))
+                {
+                    store.Open(OpenFlags.ReadWrite);
+                    store.Add(certificate);
+                }
+                File.Copy(certSource, Paths.ServerCertPath, true);   // kept so uninstall can find its thumbprint
+                DebugLog.Log("trusted server certificate " + certificate.Subject + " (thumbprint " + certificate.Thumbprint + ")");
+            }
+            catch (Exception exception) { DebugLog.Log("installing server certificate failed: " + exception); }
+        }
+
+        static void RemoveServerCert()
+        {
+            if (!File.Exists(Paths.ServerCertPath)) return;
+            try
+            {
+                X509Certificate2 certificate = new X509Certificate2(Paths.ServerCertPath);
+                using (X509Store store = new X509Store(StoreName.Root, StoreLocation.LocalMachine))
+                {
+                    store.Open(OpenFlags.ReadWrite);
+                    foreach (X509Certificate2 found in store.Certificates.Find(X509FindType.FindByThumbprint, certificate.Thumbprint, false))
+                        store.Remove(found);
+                }
+                DebugLog.Log("removed trusted server certificate " + certificate.Thumbprint);
+            }
+            catch (Exception exception) { DebugLog.Log("removing server certificate failed: " + exception.Message); }
         }
 
         static void GrantUsersWrite(string dir)

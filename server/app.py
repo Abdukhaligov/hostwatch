@@ -45,6 +45,10 @@ HERE = Path(__file__).parent
 STATIC_DIR = HERE / "static"
 AGENT_DIR = HERE / "agent" if (HERE / "agent").exists() else HERE.parent / "agent"
 AGENT_FILES = ("hostwatch-agent.exe", "hostwatch-setup.exe")
+# When the server is started over TLS, point this at the same public cert so the download zip can
+# carry it and the setup can trust it on each PC (run.sh/run.cmd pass it to uvicorn as --ssl-certfile).
+_tls_cert_env = os.environ.get("HOSTWATCH_TLS_CERT", "")
+TLS_CERT_PATH = Path(_tls_cert_env) if _tls_cert_env else None
 HISTORY_SECONDS = 900      # CPU/network samples kept (~15 min at one report per second)
 SPARK_POINTS = 120         # samples shown on the cards (~2 min)
 CPU_HOT_SECONDS = 120      # CPU ≥90% for this long is a problem
@@ -617,13 +621,17 @@ async def set_work(request: Request) -> dict:
 
 @app.get("/agent/hostwatch.zip")
 def agent_download_zip():
-    """The dashboard download: both exes in one zip, so the setup finds the agent next to itself."""
+    """The dashboard download: both exes in one zip, so the setup finds the agent next to itself.
+    When the server runs over https, the public cert goes in too (as hostwatch.crt), and the setup
+    imports it into each PC's Trusted Root so the agent can report over https with normal validation."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         for name in AGENT_FILES:
             path = AGENT_DIR / name
             if path.exists():
                 archive.write(path, name)
+        if TLS_CERT_PATH and TLS_CERT_PATH.exists():
+            archive.write(TLS_CERT_PATH, "hostwatch.crt")
     return Response(buffer.getvalue(), media_type="application/zip",
                     headers={"Content-Disposition": 'attachment; filename="hostwatch.zip"'})
 

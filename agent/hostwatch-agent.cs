@@ -212,6 +212,10 @@ namespace Hostwatch
                     if (args[i].Equals("-Server", StringComparison.OrdinalIgnoreCase))
                     { config.Server = args[i + 1].TrimEnd('/'); config.Save(); break; }
 
+            // Fall back to the address baked in at build time (see build.cmd) before asking.
+            if (string.IsNullOrEmpty(config.Server) && !string.IsNullOrEmpty(BuildConfig.DefaultServer))
+            { config.Server = BuildConfig.DefaultServer.TrimEnd('/'); config.Save(); }
+
             // Normally the setup has already stored the server; prompt only if somehow started without one.
             if (string.IsNullOrEmpty(config.Server))
             {

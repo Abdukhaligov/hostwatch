@@ -14,8 +14,12 @@ fc /b server\requirements.txt .venv\requirements.installed >nul 2>&1 || (
 )
 if /i "%~1"=="demo" set HOSTWATCH_DEMO=1
 if "%HOSTWATCH_PORT%"=="" set HOSTWATCH_PORT=8765
+rem Serve over https when a cert + key are given (HOSTWATCH_TLS_CERT / HOSTWATCH_TLS_KEY), so the agent
+rem reports encrypted. Generate a self-signed pair with tools\make-cert.ps1; the setup trusts it on clients.
+set "TLS="
+if defined HOSTWATCH_TLS_CERT if defined HOSTWATCH_TLS_KEY set "TLS=--ssl-certfile "%HOSTWATCH_TLS_CERT%" --ssl-keyfile "%HOSTWATCH_TLS_KEY%""
 cd server
-"..\.venv\Scripts\uvicorn" app:app --host 0.0.0.0 --port %HOSTWATCH_PORT%
+"..\.venv\Scripts\uvicorn" app:app --host 0.0.0.0 --port %HOSTWATCH_PORT% %TLS%
 exit /b
 
 :nopython

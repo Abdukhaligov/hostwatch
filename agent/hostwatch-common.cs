@@ -18,7 +18,7 @@ namespace Hostwatch
 {
     static class Build
     {
-        public const string Version = "3.0";
+        public const string Version = "3.1";
     }
 
     // Fixed, all-users layout: the setup puts both exes in ProgramData and points HKLM autostart at
@@ -33,6 +33,7 @@ namespace Hostwatch
         public static readonly string SetupTarget = System.IO.Path.Combine(DataDir, SetupExeName);
         public static readonly string ConfigPath = System.IO.Path.Combine(DataDir, "config.json");
         public static readonly string PendingPath = System.IO.Path.Combine(DataDir, "pending.txt");
+        public static readonly string ServerCertPath = System.IO.Path.Combine(DataDir, "hostwatch.crt");
         public const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         public const string RunValueName = "Hostwatch";
     }
